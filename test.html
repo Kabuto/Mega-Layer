@@ -4,15 +4,255 @@
 <meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/>
 <title>Test</title>
 <script src="mapview.js"></script>
+<script src="database.js"></script>
 <script>
+
+
+
 function init() {
+	let database = new Database();
+
+	
+	// Changes are not to be sent directly to the database object but to a wrapper which prepares committing, backend communication and stuff.
+	
+	let databaseWrapper = {
+		pendingChanges: [],
+		pendingChangesUndo: [],
+		changesInProgress: null,
+		changesInProgressUndo: null,
+		requestPending: false,
+		database: database,
+		pollTimeout: null,
+		initialised: false,
+		
+		init(backend) {
+			this.backend = backend;
+			return backend.requestInitialState().then(updates => {
+				this.database.modifyMultiple(updates);
+				this.initialised = true;
+				this.submit();
+			});
+		},
+		
+		modifyOne(id, oldData, data) {
+			this.pendingChangesUndo.push(this.database.modifyOne(id, exists, data));
+			// TODO record current state to allow rejecting in case of conflicts
+			this.pendingChanges.push({id: id, oldData: oldData, data: data});
+			this.submit();
+		},
+		
+		modify(updates) {
+			this.pendingChangesUndo.push(this.database.modify(update));
+			this.pendingChanges.push.apply(this.pendingChanges, updates);
+			this.submit();
+		},
+		
+		submit() {
+			// do nothing if we're waiting for a server update
+			if (this.requestPending) return;
+			if (!this.pendingChanges.length) {
+				if (!this.pollTimeout) {
+					this.pollTimeout = setTimeout(() => this.submit2(), 5000);
+				}
+				return;
+			}
+			if (this.pollTimeout) {
+				clearTimeout(this.pollTimeout);
+				this.pollTimeout = null;
+			}
+			
+			this.changesInProgress = this.pendingChanges;
+			this.changesInProgressUndo = this.pendingChangesUndo;
+			this.pendingChanges = [];
+			this.pendingChangesUndo = [];
+			this.submit2();
+		},
+		
+		submit2() {
+			this.requestPending = true;
+			(this.changesInProgress ? this.backend.submit(this.changesInProgress) : this.backend.poll()).then(serverUpdates => {
+				// TODO upon receiving an update we need to map all client IDs to those provided by the server in "pendingChanges"
+				// (no need to do so in the remainder of the database as client changes are undone and server changes are redone)
+				// TODO active editors need to be informed about remapped IDs as well so they can adapt
+				// (or in worst case cancel if the current editing operation depends on an object that got deleted / rejected)
+				for (let i = this.pendingChangesUndo.length-1; i >= 0; i--) this.database.modify(this.pendingChangesUndo[i]);
+				if (this.changesInProgressUndo) {
+					for (let i = this.changesInProgressUndo.length-1; i >= 0; i--) this.database.modify(this.changesInProgressUndo[i]);
+				}
+				this.database.modify(serverUpdates);
+				this.changesInProgress = null;
+				this.changesInProgressUndo = null;
+				try {
+					this.pendingChangesUndo = [this.database.modify(this.pendingChanges)];
+				} catch (e) {
+					this.pendingChanges = [];
+					this.pendingChangesUndo = [];
+					console.log(e);
+					alert("Cannot re-apply local changes due to a conflict with a server response: " + e.message);
+				}
+			}).catch(e => console.log(e)).then(() => {
+				this.requestPending = false;
+				this.submit();
+			})
+		}
+	};
+
+	let svgns = "http://www.w3.org/2000/svg";
+	let tracesSvgMap = new Map();
+	let tracesLayer = new SVGLayer();
+
+	// We use a SVG-based data backend for now
+	// This layer resembles all geometry that's currently stored in the database. Editing uses a different layer on top.
+	// We might choose to replace this with a tile-based layer and do partial updates (even within tiles)
+	// oldDataSupplier is a method that returns old data (from before the update) for any object when needed.
+	database.addChangeListener((id, oldData, newData, oldDataSupplier) => {
+		let svgItem;
+		// Added
+		if (!oldData) {
+			switch (newData.type) {
+			case "point":
+				svgItem = document.createElementNS(svgns, 'circle');
+				svgItem.setAttribute('r', 50);
+				svgItem.setAttribute('style', 'fill: blue; stroke: none;' );
+				break;
+			case "line":
+				svgItem = document.createElementNS(svgns, 'line');
+				svgItem.setAttribute('style', 'stroke: blue; stroke-width: 100px;' );
+				let p1 = database.get(newData.$point$1);
+				let p2 = database.get(newData.$point$2);
+				line.setAttribute('x1', p1.x);
+				line.setAttribute('y1', p1.y);
+				line.setAttribute('x2', p2.x);
+				line.setAttribute('y2', p2.y);
+				break;
+			default:
+				throw new Error("Unsupported SVG item");
+			}
+			tracesLayer.svg.insertBefore(svgItem, dot);
+			tracesSvgMap.set(id, svgItem);
+		} else {
+			svgItem = tracesSvgMap.get(id);
+		}
+		// Deleted
+		if (!newData) {
+			if (svgItem) svgItem.parentNode.removeChild(svgItem);
+			tracesSvgMap.delete(id);
+		}
+		// Update object (and referrers too if some exist)
+		if (newData) {
+			switch (newData.type) {
+			case "point":
+				svgItem.setAttribute('cx', newData.x);
+				svgItem.setAttribute('cy', newData.y);
+				for (let id2 of database.getReferrers(id)) {
+					let data = database.get(id2);
+					let svgItem = tracesSvgMap.get(id2);
+					switch (data.type) {
+					case "line":
+						if (id2 == data.$point$1) {
+							svgItem.setAttribute('x1', newData.x);
+							svgItem.setAttribute('y1', newData.y);
+						}
+						if (id2 == data.$point$2) {
+							svgItem.setAttribute('x2', newData.x);
+							svgItem.setAttribute('y2', newData.y);
+						}
+						break;
+					}
+				}
+			}
+		}
+	});
+	
+	let internalIDGenerator = 0;
+	let editLayer = new SVGLayer();
+
+	// Next up: edit tools
+	
+	let editTools = [{
+		name: "view",
+		// called upon activating this layer, followed up by a "mousemove" call to reset all mouse-over activity
+		activate() {
+			this.line = null;
+			this.dot = document.createElementNS(svgns, 'circle');
+			this.dot.setAttribute('r', 50);
+			this.dot.setAttribute('style', 'fill: red; stroke: blue; stroke-width: 1px;' );
+			editLayer.svg.appendChild(this.dot);
+		},
+		deactivate() {
+			editLayer.svg.removeChild(this.dot);
+		},
+		mousedown(e) {
+			if (e.button == 0) {
+				// register a point
+				let id = --internalIDGenerator;
+				databaseWrapper.modify(id, false, {type: "point", x: e.y, y: e.y});
+				if (this.lastPoint) {
+					databaseWrapper.modify(id, false, {type: "line", $point$1: this.lastPoint, $point$2: id});
+				}
+				this.lastPoint = id;
+			}
+		},
+		mousemove(e) {
+			this.dot.setAttribute('cx', e.x);
+			this.dot.setAttribute('cy', e.y);
+			if (this.line) {
+				this.line.setAttribute('x2', e.x);
+				this.line.setAttribute('y2', e.y);
+			}
+		},
+		mouseup(e) {
+			/*if (dot && e.button == 0) {
+				svg.svg.removeChild(dot);
+				dot = null;
+			}*/
+		}
+	}, {
+		name: "lines",
+	}];
+	
+	let currentTool = 0;
+	
+	
 	let mapView = new MapView(1200, 800, 23429, 23351, [
-		new ImageLayer("example.jpg", 10)
-	]);
+		new ImageLayer("example.jpg", 10),
+		tracesLayer,
+		editLayer
+	], {
+		mousedown: (e) => {
+			if (editTools[currentTool].mousedown) editTools[currentTool].mousedown(e);
+		},
+		mousemove: (e) => {
+			if (editTools[currentTool].mousemove) editTools[currentTool].mousemove(e);
+		},
+		mouseup: (e) => {
+			if (editTools[currentTool].mouseup) editTools[currentTool].mouseup(e);
+		}
+	});
 	window.mapView = mapView;
 
 	mapView.div.style.margin = "0 auto";
+
+	let loadingHint = document.createElement("div");
+	loadingHint.textContent = "loading...";
+	loadingHint.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;text-align:center;background:rgba(0,0,0,.5);color:white;font-size:100px;";
+	mapView.div.appendChild(loadingHint);
+
 	document.body.appendChild(mapView.div);
+
+	// TODO submit muss eine Map von alten auf neue IDs zurückgeben
+	// TODO jede interne ID sollte bei Erzeugung ein Referenz-Objekt bekommen, das bei Auflösen auf die Server-ID und beim (vor Vergabe einer Server-ID erfolgten) finalen Löschen auf null gesetzt wird.
+	// Es sollte keine Referenz auf diese ID behalten werden.
+	let backend = {
+		requestInitialState: () => Promise.resolve([]),
+		submit: changes => Promise.resolve(changes),
+		poll: () => Promise.resolve([])
+	};
+	
+	databaseWrapper.init(backend).then(() => {
+		if (loadingHint.parentNode) loadingHint.parentNode.removeChild(loadingHint);
+		editTools[currentTool].activate();
+	}).catch(e => console.error(e));
 }
 </script>
 </head>
