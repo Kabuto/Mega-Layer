@@ -10,10 +10,17 @@
 
 
 function init() {
+	// TODO let the localStorage backend use a database too
 	let database = new Database();
 
 	
 	// Changes are not to be sent directly to the database object but to a wrapper which prepares committing, backend communication and stuff.
+	
+	// TODO undoing and then immediately redoing is easy to implement as this e.g. solves IDs of objects changing but it has the huge disadvantage of
+	// breaking edit operations since it looks like a required object was destroyed, cancelling the operation.
+	// Merging undoing and redoing to a single update won't work either because it won't merge an object with a client ID being replaced with an object with a server ID.
+	// Also, merging doesn't leave any safe place for publishing the ID mapping.
+	// Idea: try collecting updates across ID changes, forward another field to edit objects, named "ID change"...
 	
 	let databaseWrapper = {
 		pendingChanges: [],
@@ -24,76 +31,194 @@ function init() {
 		database: database,
 		pollTimeout: null,
 		initialised: false,
+		updateListeners: [],
+		generalUpdateListeners: [],
+		internalIDGenerator: 0,
+
+		callListeners(oldState, newState, getOldData, getNewData) {
+			for (let l of this.updateListeners) {
+				try {
+					l(oldState, newState, getOldData, getNewData);
+				} catch (e) {
+					console.log(e);
+				}
+			}
+		},
+
+		callGeneralListeners() {
+			for (let l of this.generalUpdateListeners) {
+				try {
+					l();
+				} catch (e) {
+					console.log(e);
+				}
+			}
+		},
 		
 		init(backend) {
 			this.backend = backend;
-			return backend.requestInitialState().then(updates => {
-				this.database.modifyMultiple(updates);
+			return backend.snapshot().then(updates => {
+				this.database.modify(updates);
 				this.initialised = true;
 				this.submit();
 			});
 		},
 		
-		modifyOne(id, oldData, data) {
-			this.pendingChangesUndo.push(this.database.modifyOne(id, exists, data));
-			// TODO record current state to allow rejecting in case of conflicts
-			this.pendingChanges.push({id: id, oldData: oldData, data: data});
-			this.submit();
+		insert(data) {
+			if (data == null) throw new Error();
+			let id = --this.internalIDGenerator;
+			this.modifyOne(id, null, data);
+			return id;
 		},
 		
+		update(id, oldData, data) {
+			if (data == null) throw new Error();
+			this.modifyOne(id, oldData || true, data);
+		},
+		
+		delete(id, oldData) {
+			this.modifyOne(id, oldData || true, null);
+		},
+		
+		// Modifies a single entry. Modification requests are collected and only sent once the calling code exited.
+		modifyOne(id, oldData, data) {
+			this.modify([{id: id, oldData: oldData, data: data}]);
+		},
+		
+		// Modifies multiple entries. Modification requests are collected and only sent once the calling code exited.
 		modify(updates) {
-			this.pendingChangesUndo.push(this.database.modify(update));
+			// TODO call our own listeners
+			let oldState = new Map();
+			for (let update of updates) {
+				oldState.set(update.id, this.database.get(update.id));
+			}
+			let undoData = this.database.getUndoUpdates(updates)[0];
+			this.database.modify(updates);
+			for (let id of oldState.keys()) {
+				this.callListeners(oldState.get(id) ? {id: id, data: oldState.get(id)} : null, database.get(id) ? {id: id, data: database.get(id)} : null, id => (oldState.has(id) ? oldState : database).get(id), id => database.get(id));
+			}
+			this.callGeneralListeners();
+			this.pendingChangesUndo.push(undoData);
 			this.pendingChanges.push.apply(this.pendingChanges, updates);
 			this.submit();
 		},
 		
+		addUpdateListener(listener) {
+			this.updateListeners.push(listener);
+		},
+		
+		addGeneralUpdateListener(listener) {
+			this.generalUpdateListeners.push(listener);
+		},
+		
 		submit() {
-			// do nothing if we're waiting for a server update
+			// If a server poll is in progress then return instantly; the response handler will take care of all updates in progress
 			if (this.requestPending) return;
+			// If there are no pending changes then this is just a server poll request which can wait a bit
 			if (!this.pendingChanges.length) {
-				if (!this.pollTimeout) {
+				if (this.pollTimeout == null) {
 					this.pollTimeout = setTimeout(() => this.submit2(), 5000);
 				}
 				return;
 			}
+			// So we need to actually submit something; clear any previous timeout to shorten the wait period
 			if (this.pollTimeout) {
 				clearTimeout(this.pollTimeout);
-				this.pollTimeout = null;
 			}
-			
+			this.pollTimeout = setTimeout(() => this.submit2(), 0);
+		},
+		
+		submit2() {
+			this.pollTimeout = null;
 			this.changesInProgress = this.pendingChanges;
 			this.changesInProgressUndo = this.pendingChangesUndo;
 			this.pendingChanges = [];
 			this.pendingChangesUndo = [];
-			this.submit2();
-		},
-		
-		submit2() {
 			this.requestPending = true;
-			(this.changesInProgress ? this.backend.submit(this.changesInProgress) : this.backend.poll()).then(serverUpdates => {
-				// TODO upon receiving an update we need to map all client IDs to those provided by the server in "pendingChanges"
-				// (no need to do so in the remainder of the database as client changes are undone and server changes are redone)
-				// TODO active editors need to be informed about remapped IDs as well so they can adapt
-				// (or in worst case cancel if the current editing operation depends on an object that got deleted / rejected)
-				for (let i = this.pendingChangesUndo.length-1; i >= 0; i--) this.database.modify(this.pendingChangesUndo[i]);
+
+			let promise;
+			if (this.changesInProgress.length) {
+				promise = this.backend.update(this.changesInProgress);
+			} else {
+				// remap to a promise without any actual updates sent
+				promise = this.backend.difference().then(updates => ({objects: updates, clientToServerIDMap: new Map()}));
+			}
+			promise.then(response => {
+				let serverUpdates = response.objects;
+				let idMap = response.clientToServerIDMap;
+				// The updates we just submitted already have their IDs mapped.
+				// But we still need to apply them to pending changes
+				let undoLocalUpdates = [];
+				for (let i = this.pendingChangesUndo.length-1; i >= 0; i--) undoLocalUpdates.push.apply(undoLocalUpdates, this.pendingChangesUndo[i]);
 				if (this.changesInProgressUndo) {
-					for (let i = this.changesInProgressUndo.length-1; i >= 0; i--) this.database.modify(this.changesInProgressUndo[i]);
+					for (let i = this.changesInProgressUndo.length-1; i >= 0; i--) undoLocalUpdates.push.apply(undoLocalUpdates, this.changesInProgressUndo[i]);
 				}
-				this.database.modify(serverUpdates);
+
+				let mapIDs = obj => {
+					if (!obj || obj === true) return obj;
+					obj = Object.assign({}, obj);
+					for (let k in obj) {
+						if (k[0] =="$" && obj[k] != null && obj[k] < 0 && idMap.has(obj[k])) {
+							obj[k] = idMap.get(obj[k]);
+						}
+					}
+				};
+				for (let item in this.pendingChanges) {
+					item.oldData = mapIDs(item.oldData);
+					item.data = mapIDs(item.data);
+				}
+				
+				// TODO prepare for this to fail, and if it does, retry 
+				this.pendingChangesUndo = [this.database.getUndoUpdates(undoLocalUpdates, serverUpdates, this.pendingChanges)[2]];
+				let allUpdates = undoLocalUpdates.concat(serverUpdates, this.pendingChanges);
+				// Collect old state of objects before applying
+				let oldState = new Map();
+				for (let update of allUpdates) {
+					oldState.set(update.id, this.database.get(update.id));
+				}
+				if (this.pendingChanges.length) {
+					this.database.modify(allUpdates);
+				} else {
+					try {
+						this.database.modify(allUpdates);
+					} catch (e) {
+						console.log("Conflict during updating", e);
+
+						// in case of conflict discard local updates
+						this.pendingChanges = [];
+						this.pendingChangesUndo = [];
+						undoData = [];
+						allUpdates = undoLocalUpdates.concat(serverUpdates);
+						oldState = new Map();
+						for (let update of allUpdates) {
+							oldState.set(update.id, this.database.get(update.id));
+						}
+						this.database.modify(allUpdates);
+					}
+				}
+				
+				
+				// verify
+				let targetIDs = new Set(idMap.values());
+				for (let id of idMap.keys()) if (database.get(id) != null) throw new Error();
+				for (let id of targetIDs.keys()) if (oldState.get(id) != null) throw new Error();
+				// call all listeners
+				for (let id of oldState.keys()) {
+					if (targetIDs.has(id)) continue; // the original ID will be used for calling
+					let id2 = idMap.has(id) ? idMap.get(id) : id;
+					let oldData = oldState.get(id);
+					let newData = database.get(id2);
+					this.callListeners(oldData && {id: id, data: oldData}, newData && {id: id2, data: newData}, id => (oldState.has(id) ? oldState : database).get(id), id => database.get(id));
+				}
+				this.callGeneralListeners();
+
+				// Only after mapping all IDs re-apply pending local updates
 				this.changesInProgress = null;
 				this.changesInProgressUndo = null;
-				try {
-					this.pendingChangesUndo = [this.database.modify(this.pendingChanges)];
-				} catch (e) {
-					this.pendingChanges = [];
-					this.pendingChangesUndo = [];
-					console.log(e);
-					alert("Cannot re-apply local changes due to a conflict with a server response: " + e.message);
-				}
 			}).catch(e => console.log(e)).then(() => {
 				this.requestPending = false;
 				this.submit();
-			})
+			}).catch(e => console.log(e));
 		}
 	};
 
@@ -120,15 +245,15 @@ function init() {
 				svgItem.setAttribute('style', 'stroke: blue; stroke-width: 100px;' );
 				let p1 = database.get(newData.$point$1);
 				let p2 = database.get(newData.$point$2);
-				line.setAttribute('x1', p1.x);
-				line.setAttribute('y1', p1.y);
-				line.setAttribute('x2', p2.x);
-				line.setAttribute('y2', p2.y);
+				svgItem.setAttribute('x1', p1.x);
+				svgItem.setAttribute('y1', p1.y);
+				svgItem.setAttribute('x2', p2.x);
+				svgItem.setAttribute('y2', p2.y);
 				break;
 			default:
 				throw new Error("Unsupported SVG item");
 			}
-			tracesLayer.svg.insertBefore(svgItem, dot);
+			tracesLayer.svg.appendChild(svgItem);
 			tracesSvgMap.set(id, svgItem);
 		} else {
 			svgItem = tracesSvgMap.get(id);
@@ -160,45 +285,168 @@ function init() {
 						break;
 					}
 				}
+				break;
+			case "line":
+				let p1 = database.get(newData.$point$1);
+				let p2 = database.get(newData.$point$2);
+				let line = tracesSvgMap.get(id);
+				line.setAttribute('x1', p1.x);
+				line.setAttribute('y1', p1.y);
+				line.setAttribute('x2', p2.x);
+				line.setAttribute('y2', p2.y);
+				break;
 			}
 		}
 	});
 	
-	let internalIDGenerator = 0;
 	let editLayer = new SVGLayer();
 
+	let distance = function(a,b) {
+		let dx = a.x-b.x;
+		let dy = a.y-b.y;
+		return Math.sqrt(dx*dx+dy*dy);
+	}
+	
 	// Next up: edit tools
 	
 	let editTools = [{
 		name: "view",
+		
+		addDot(id, data) {
+			let dot = document.createElementNS(svgns, 'circle');
+			dot.setAttribute('r', 50);
+			dot.setAttribute('style', 'fill: none; stroke: red; stroke-width: 1px;' );
+			dot.setAttribute('cx', data.x);
+			dot.setAttribute('cy', data.y);
+			editLayer.svg.appendChild(dot);
+			this.dotMap.set(id, dot);
+		},
+		
 		// called upon activating this layer, followed up by a "mousemove" call to reset all mouse-over activity
 		activate() {
-			this.line = null;
 			this.dot = document.createElementNS(svgns, 'circle');
 			this.dot.setAttribute('r', 50);
 			this.dot.setAttribute('style', 'fill: red; stroke: blue; stroke-width: 1px;' );
 			editLayer.svg.appendChild(this.dot);
+			this.dotMap = new Map();
+			for (let id of database.getIdsOfType("point")) {
+				this.addDot(id, this.database.get(id));
+			}
 		},
 		deactivate() {
-			editLayer.svg.removeChild(this.dot);
+			while (editLayer.svg.lastChild) editLayer.svg.removeChild(editLayer.svg.lastChild);
+			this.dot = null;
+			this.dotMap = null;
+			this.line = null;
+		},
+		getPointAt(e) {
+			let nearestPoint = null, nearestPointDistance = 50;
+			for (let id of database.getIdsOfType("point")) {
+				let data = database.get(id);
+				let dist = distance(e,data);
+				if (dist < nearestPointDistance) {
+					nearestPointDistance = dist;
+					nearestPoint = id;
+				}
+			}
+			return nearestPoint;
+		},
+		getLineAt(e) {
+			let nearestLine = null, nearestLineDistance = 50, nearestPointOnLine = null;
+			for (let id of database.getIdsOfType("line")) {
+				// only needs to cover the rect area, no rounded caps needed as they are already handled by getPointAt
+				let data = database.get(id);
+				let a = database.get(data.$point$1);
+				let b = database.get(data.$point$2);
+				let dx = b.x-a.x;
+				let dy = b.y-a.y;
+				if (dx == 0 && dy == 0) continue;
+				let dxa = a.x-e.x;
+				let dya = a.y-e.y;
+				// distance to line, assuming its length being infinite
+				let dist = Math.abs(dx*dya - dy*dxa)/Math.sqrt(dx*dx+dy*dy);
+				let pointOnLine = -(dx*dxa + dy*dya)/(dx*dx + dy*dy);
+				if (dist < nearestLineDistance && pointOnLine > 0 && pointOnLine < 1) {
+					console.log("dist: " + dist);
+					nearestLineDistance = dist;
+					nearestLine = id;
+					nearestPointOnLine = pointOnLine;
+				}
+			}
+			if (nearestLine == null) return null;
+			let data = database.get(nearestLine);
+			let a = database.get(data.$point$1);
+			let b = database.get(data.$point$2);
+			return ({id: nearestLine, x: a.x+(b.x-a.x)*nearestPointOnLine, y: a.y+(b.y-a.y)*nearestPointOnLine});
 		},
 		mousedown(e) {
 			if (e.button == 0) {
-				// register a point
-				let id = --internalIDGenerator;
-				databaseWrapper.modify(id, false, {type: "point", x: e.y, y: e.y});
-				if (this.lastPoint) {
-					databaseWrapper.modify(id, false, {type: "line", $point$1: this.lastPoint, $point$2: id});
+				let nearestPoint = this.getPointAt(e);
+				let nearestLine = nearestPoint ? null : this.getLineAt(e);
+				let pos = nearestPoint ? database.get(nearestPoint) : nearestLine ? nearestLine : e;
+				let id = nearestPoint != null ? nearestPoint : databaseWrapper.insert({type: "point", x: pos.x, y: pos.y});
+				if (nearestLine) {
+					// reconnect
+					let data = database.get(nearestLine.id);
+					let newData = Object.assign({}, data);
+					let newData2 = Object.assign({}, data);
+					newData.$point$2 = id;
+					newData2.$point$1 = id;
+					databaseWrapper.update(nearestLine.id, data, newData);
+					databaseWrapper.insert(newData2);
 				}
+				let data = database.get(id);
+				if (this.lastPoint) {
+					let duplicate = false;
+					if (this.lastPoint != id) {
+						// don't insert the same line twice
+						for (let id of database.getIdsOfType("line")) {
+							let ldata = database.get(id);
+							if (ldata.$point$1 == this.lastPoint && ldata.$point$2 == id || ldata.$point$2 == this.lastPoint && ldata.$point$1 == id) {
+								duplicate = true;
+							}
+						}
+						if (!duplicate) {
+							databaseWrapper.insert({type: "line", $point$1: this.lastPoint, $point$2: id});
+						}
+					}
+					if (duplicate || nearestPoint != null || nearestLine != null) {
+						this.lastPoint = null;
+						if (this.line != null) {
+							this.line.parentNode.removeChild(this.line);
+							this.line = null;
+						}
+						return;
+					}
+				}
+				if (!this.line) {
+					this.line = document.createElementNS(svgns, 'line');
+					this.line.setAttribute('style', 'stroke: rgba(255,0,0,.5); stroke-width: 100px;' );
+					editLayer.svg.appendChild(this.line);
+				}
+				this.line.setAttribute('x1', data.x);
+				this.line.setAttribute('y1', data.y);
+				this.line.setAttribute('x2', data.x);
+				this.line.setAttribute('y2', data.y);
 				this.lastPoint = id;
 			}
 		},
 		mousemove(e) {
-			this.dot.setAttribute('cx', e.x);
-			this.dot.setAttribute('cy', e.y);
+			let nearestPoint = this.getPointAt(e);
+			let nearestLine = nearestPoint ? null : this.getLineAt(e);
+			let pos;
+			if (nearestPoint != null) {
+				pos = database.get(nearestPoint);
+			} else if (nearestLine != null) {
+				pos = nearestLine;
+			} else {
+				pos = e;
+			}
+			this.dot.setAttribute('cx', pos.x);
+			this.dot.setAttribute('cy', pos.y);
 			if (this.line) {
-				this.line.setAttribute('x2', e.x);
-				this.line.setAttribute('y2', e.y);
+				this.line.setAttribute('x2', pos.x);
+				this.line.setAttribute('y2', pos.y);
 			}
 		},
 		mouseup(e) {
@@ -206,6 +454,35 @@ function init() {
 				svg.svg.removeChild(dot);
 				dot = null;
 			}*/
+		},
+		change2(oldState, newState) {
+			if (oldState && this.lastPoint == oldState.id) {
+				this.lastPoint = newState ? newState.id : null;
+				if (this.line) {
+					if (newState) {
+						this.line.setAttribute('x1', newState.data.x);
+						this.line.setAttribute('y1', newState.data.y);
+					} else {
+						this.line.parentNode.removeChild(this.line);
+						this.line = null;
+						this.lastPoint = null;
+					}
+				}
+			}
+		},
+		change(id, oldData, newData, oldDataSupplier) {
+			let dot = this.dotMap.get(id);
+			if (dot) {
+				if (newData) {
+					dot.setAttribute('cx', newData.x);
+					dot.setAttribute('cy', newData.y);
+				} else {
+					this.dotMap.delete(id);
+					dot.parentNode.removeChild(dot);
+				}
+			} else if (newData && newData.type == "point") {
+				this.addDot(id, newData);
+			}
 		}
 	}, {
 		name: "lines",
@@ -239,14 +516,57 @@ function init() {
 	mapView.div.appendChild(loadingHint);
 
 	document.body.appendChild(mapView.div);
+	
+	databaseWrapper.addGeneralUpdateListener(() => {
+		if (editTools[currentTool].change3) editTools[currentTool].change3(); 
+	});
+	databaseWrapper.addUpdateListener((oldState, newState, getOldData, getNewData) => {
+		if (editTools[currentTool].change2) editTools[currentTool].change2(oldState, newState, getOldData, getNewData); 
+	});
+	database.addChangeListener((id, oldData, newData, oldDataSupplier) => {
+		if (editTools[currentTool].change) editTools[currentTool].change(id, oldData, newData, oldDataSupplier); 
+	});
 
-	// TODO submit muss eine Map von alten auf neue IDs zurückgeben
-	// TODO jede interne ID sollte bei Erzeugung ein Referenz-Objekt bekommen, das bei Auflösen auf die Server-ID und beim (vor Vergabe einer Server-ID erfolgten) finalen Löschen auf null gesetzt wird.
-	// Es sollte keine Referenz auf diese ID behalten werden.
+	// The backend provides an interface between client and server
 	let backend = {
-		requestInitialState: () => Promise.resolve([]),
-		submit: changes => Promise.resolve(changes),
-		poll: () => Promise.resolve([])
+		serverIDGenerator: 0,
+		snapshot: function() {
+			return Promise.resolve([]);
+		},
+		update: function(changes) {
+			// map all internal IDs
+			let internalToExternalIDMap = new Map();
+			let result = [];
+			let mapIDs = obj => {
+				if (!obj || obj === true) return obj;
+				obj = Object.assign({}, obj);
+				for (let k in obj) {
+					if (k[0] =="$" && obj[k] != null && obj[k] < 0) {
+						if (!internalToExternalIDMap.has(obj[k])) throw new Error();
+						obj[k] = internalToExternalIDMap.get(obj[k]);
+					}
+				}
+				return obj;
+			};
+			for (let change of changes) {
+				let id = change.id;
+				if (id == null || id < 0) {
+					id = ++this.serverIDGenerator;
+					if (change.id < 0) {
+						internalToExternalIDMap.set(change.id, id);
+					}
+				}
+				result.push({id: id, oldData: mapIDs(change.oldData), data: mapIDs(change.data)});
+			}
+			
+			return Promise.resolve({
+				objects: result,
+				clientToServerIDMap: internalToExternalIDMap
+			});
+		},
+		difference: function() {
+			return Promise.resolve([]);
+		}
 	};
 	
 	databaseWrapper.init(backend).then(() => {

@@ -13,15 +13,20 @@ class DiffMapSet {
 	getAll(k) {
 		let a = this.m.get(k), b = this.n.get(k);
 		if (!a && !b) return new Set();
-		if (!a || a.isEmpty()) return b;
-		if (!b || b.isEmpty()) return a;
+		if (!a || !a.size) return b;
+		if (!b || !b.size) return a;
 		let xor = new Set(a);
 		for (let id of b) if (xor.has(id)) xor.delete(id); else xor.add(id);
 		return xor;
 	}
 	hasAny(k) {
 		let a = this.m.get(k), b = this.n.get(k);
-		return (a && !a.isEmpty()) ? (!b || a.size() != b.size() || !a.every(id => b.has(id))) : (b && !b.isEmpty());
+		return (a && a.size) ? (!b || !this.setsEqual(a,b)) : (b && b.size);
+	}
+	setsEqual(a,b) {
+		if (a.size != b.size) return false;
+		for (let k of a) if (!b.has(k)) return false;
+		return true;
 	}
 	toggle(k,v,newState) {
 		let oldState = this.has(k,v);
@@ -39,13 +44,13 @@ class DiffMapSet {
 	set(k,v) {
 		this.toggle(k,v,true);
 	}
-	remove(k,v) {
+	delete(k,v) {
 		this.toggle(k,v,false);
 	}
 	mergeAll() {
 		for (let k of this.n.keys()) {
 			let merged = this.getAll(k);
-			if (!merged.isEmpty) this.m.set(k, merged); else this.m.delete(k);
+			if (merged.size) this.m.set(k, merged); else this.m.delete(k);
 		}
 		this.n = new Map();
 	}
@@ -54,14 +59,26 @@ class DiffMapSet {
 			let merged = this.getAll(k);
 			if (this.m.has(k)) {
 				this.m.set(k, merged);
-			} else if (!merged.isEmpty()) {
-				throw new Error();
+			} else if (merged.size) {
+				merged = this.getAll(k);
+				throw new Error("Merging for missing key " + k + " yielded " + [...merged].join(","));
 			}
 		}
 		this.n = new Map();
 	}
 	getKeysOfUpdated() {
 		return this.n.keys();
+	}
+	toString() {
+		let result = [];
+		for (let k of this.m.keys()) {
+			result.push(k+":" + [...this.m.get(k)].join(","));
+		}
+		result.push("");
+		for (let k of this.n.keys()) {
+			result.push(k+":" + [...this.n.get(k)].join(","));
+		}
+		return result.join(";");
 	}
 }
 
@@ -118,11 +135,41 @@ class Database {
 	}
 
 	/**
+	 * Computes steps necessary for undoing the given updates. Call this prior to calling update() with the same set of updates to generate undo statements.
+	 * This returns an array of arrays - one array for undoing each update array specified as a parameter. These must be applied in reverse order for undoing.
+	 */
+	getUndoUpdates(...updateGroups) {
+		// This map will collect effective updates to the internal object map (i.e. key exists = the corrensponding value in this map overrides the database's state)
+		let objectsDiff1 = new Map();
+		let result = [];
+		for (let updates of updateGroups) {
+			let objectsDiff2 = new Map();
+			for (let update of updates) {
+				// Get properties of update
+				let id = update.id;
+				let data = update.data;
+				let oldData = (objectsDiff2.has(id) ? objectsDiff2 : objectsDiff1.has(id) ? objectsDiff1 : this.objects).get(id);
+
+				// Verify with current database state that we're doing something meaningful
+				if (oldData || data) objectsDiff2.set(id, data && Object.assign({},data));
+			}
+			
+			// Collect data for undoing later on if needed
+			result.push([...objectsDiff2.keys()].map(id => ({id: id, oldData: objectsDiff2.get(id), data: (objectsDiff1.has(id) ? objectsDiff1 : this.objects).get(id)})));
+			for (let k of objectsDiff2.keys()) {
+				objectsDiff1.set(k, objectsDiff2.get(k));
+			}
+		}
+		return result;
+	}
+	
+	/**
 	 * Mass create/update/delete method
 	 * @param updates an array of updates. Each update is a map consisting of an id, oldData and data. See the modifyOne method for the meaning of those.
 	 * @return an update set that, when applied, will undo this update's actions
 	 */
 	modify(updates) {
+		console.info("Trying to submit " + updates.length + " updates: " + updates.map(u => (u.oldData ? u.data ? "update" : "delete" : u.data ? "insert" : "nop") + " " + u.id + " " + (u.oldData && u.oldData != null ? JSON.stringify(u.oldData) : "") + (u.oldData && u.data ? " with " : "") + (u.data ? JSON.stringify(u.data) : "")).join(", "));
 		if (this.locked) throw new Error("Modifications are not permitted from within listener calls");
 		// This map will collect effective updates to the internal object map (i.e. key exists = the corrensponding value in this map overrides the database's state)
 		let objectsDiff = new Map();
@@ -149,22 +196,23 @@ class Database {
 			// Delete old referrers
 			if (oldData) {
 				for (let k in oldData) {
-					if (k[0] == "$" && data[k] != null) {
-						referrersDiff.delete(data[k], id);
+					if (k[0] == "$" && oldData[k] != null) {
+						referrersDiff.delete(oldData[k], id);
 					}
 				}
 			}
 			// Apply object to temporary updates
-			objectsDiff.set(id, Object.assign({},data));
+			objectsDiff.set(id, data && Object.assign({},data));
 			// Add new references
 			if (data) {
 				for (let k in data) {
 					if (k[0] == "$" && data[k] != null) {
-						referrersDiff.add(data[k], id);
+						referrersDiff.set(data[k], id);
 					}
 				}
 			}
 		}
+
 		// check integrity - abort when references to no-longer-existing objects are encountered
 		// we need to check entries in "objectsDiff" with missing value (i.e. deleted) as well as entries in "referrersDiff" with missing accompanying object
 		for (let id of objectsDiff.keys()) {
@@ -172,19 +220,21 @@ class Database {
 				throw new Error("Dead reference found");
 			}
 		}
+
 		for (let id of referrersDiff.getKeysOfUpdated()) {
 			// no need to check entries in objectsDiff - they can only cause issues if they are dead and then they will have already been found by the previous check
 			if (!objectsDiff.has(id) && !this.objects.has(id) && referrersDiff.hasAny(id)) {
 				throw new Error("Dead reference found");
 			}
 		}
+
 		// check that object references refer objects of the correct type
 		for (let id of objectsDiff.keys()) {
 			let data = objectsDiff.get(id);
 			if (data) {
 				for (let k in data) {
 					if (k[0] == "$" && data[k] != null) {
-						let targetType = (objectsDiff.has(id) ? objectsDiff : this.objects).get(data[k]).type;
+						let targetType = (objectsDiff.get(data[k]) || this.objects.get(data[k])).type;
 						if (k.substring(1, targetType.length+1) != targetType || k[targetType.length+1] != "$") {
 							throw new Error("Illegal reference (targeting the wrong type)");
 						}
@@ -194,11 +244,19 @@ class Database {
 		}
 
 		// If we get here then the update is fine
-
-		// Collect data for undoing later on if needed
-		let undoData = objectsDiff.keys().map(id => ({id: id, oldData: objectsDiff.get(id), data: this.objects.get(id)}));
 		
-		// apply object updates
+		// add missing referrer sets
+		for (let id of objectsDiff.keys()) {
+			let oldData = this.objects.get(id);
+			let newData = objectsDiff.get(id);
+			if (!oldData && newData) {
+				this.referrers.set(id, new Set());
+			}
+		}
+
+		referrersDiff.mergeAllRequireExistingKeys();
+
+		
 		for (let id of objectsDiff.keys()) {
 			let oldData = this.objects.get(id);
 			let newData = objectsDiff.get(id);
@@ -211,7 +269,6 @@ class Database {
 				this.types.get(oldData.type).delete(id);
 			}
 			if (!oldData) {
-				this.referrers.set(id, new Set());
 				let typeSet = this.types.get(newData.type);
 				if (!typeSet) {
 					typeSet = new Set();
@@ -219,10 +276,11 @@ class Database {
 				}
 				typeSet.add(id);
 			}
+			// reverse objectsDiff
+			objectsDiff.set(id, oldData);
 		}
 
-		referrersDiff.mergeAllRequireExistingKeys();
-
+		
 		this.locked = true;
 		let queryOldData = id => (objectsDiff.has(id) ? objectsDiff : this.objects).get(id);
 		for (let id of objectsDiff.keys()) {
@@ -241,7 +299,7 @@ class Database {
 			l(new Set(objectsDiff.keys()), queryOldData);
 		}
 		this.locked = false;
-		return undoData;
+		console.info("...successfully");
 	}
 	
 	get(id) {
@@ -257,7 +315,7 @@ class Database {
 	}
 	
 	getIdsOfType(type) {
-		return this.types.get(type);
+		return this.types.get(type) || new Set();
 	}
 	
 	// Adds a listener that will be called on every successful change.
