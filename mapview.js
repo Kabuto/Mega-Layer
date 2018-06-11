@@ -142,12 +142,12 @@ class MapView {
 		let dragstartCoords = null;
 		let mousemoveFunc = e => {
 			e.preventDefault();
-			callEventHandler("mousemove", e,getCoords(e),null,pressedButtons);
 			if (pressedButtons && dragstartCoords && Math.pow(dragstartCoords.x-e.clientX,2)+Math.pow(dragstartCoords.y-e.clientY,2) >= this.config.dragThreshold) {
 				clickHandlers = [];
 				callEventHandler("dragstart", e, dragstartCoords.map, null, pressedButtons);
 				dragstartCoords = null;
 			}
+			callEventHandler("mousemove", e,getCoords(e),null,pressedButtons);
 			if (pressedButtons && !dragstartCoords) {
 				callEventHandler("drag", e, getCoords(e), null, pressedButtons);
 			}

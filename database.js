@@ -8,7 +8,7 @@ class DiffMapSet {
 	}
 	has(k, v) {
 		return (this.m.has(k) && this.m.get(k).has(v)) ^
-				(this.n.has(v) && this.n.get(k).has(v));
+				(this.n.has(k) && this.n.get(k).has(v));
 	}
 	getAll(k) {
 		let a = this.m.get(k), b = this.n.get(k);
@@ -166,10 +166,9 @@ class Database {
 	/**
 	 * Mass create/update/delete method
 	 * @param updates an array of updates. Each update is a map consisting of an id, oldData and data. See the modifyOne method for the meaning of those.
-	 * @return an update set that, when applied, will undo this update's actions
 	 */
 	modify(updates) {
-		console.info("Trying to submit " + updates.length + " updates: " + updates.map(u => (u.oldData ? u.data ? "update" : "delete" : u.data ? "insert" : "nop") + " " + u.id + " " + (u.oldData && u.oldData != null ? JSON.stringify(u.oldData) : "") + (u.oldData && u.data ? " with " : "") + (u.data ? JSON.stringify(u.data) : "")).join(", "));
+		//console.info("Trying to modify with " + updates.length + " updates: " + updates.map(u => (u.oldData ? u.data ? "update" : "delete" : u.data ? "insert" : "nop") + " " + u.id + " " + (u.oldData && u.oldData != null ? JSON.stringify(u.oldData) : "") + (u.oldData && u.data ? " with " : "") + (u.data ? JSON.stringify(u.data) : "")).join(", "));
 		if (this.locked) throw new Error("Modifications are not permitted from within listener calls");
 		// This map will collect effective updates to the internal object map (i.e. key exists = the corrensponding value in this map overrides the database's state)
 		let objectsDiff = new Map();
@@ -182,12 +181,12 @@ class Database {
 			let oldData = (objectsDiff.has(id) ? objectsDiff : this.objects).get(id);
 			// Verify with current database state that we're doing something meaningful
 			if (!update.oldData) {
-				if (oldData) throw new Error("Duplicate id");
+				if (oldData) throw new Error("Duplicate id for update " + JSON.stringify(update));
 			} else {
-				if (!oldData) throw new Error("Cannot update or delete non-existing objects");
+				if (!oldData) throw new Error("Cannot update or delete non-existing objects: tried to " + JSON.stringify(update));
 				if (update.oldData !== true) {
-					for (let i in update.oldData) if (update.oldData[i] != oldData[i]) throw new Error("Expected and actual old data differ");
-					for (let i in oldData) if (update.oldData[i] != oldData[i]) throw new Error("Expected and actual old data differ");
+					for (let i in update.oldData) if (update.oldData[i] != oldData[i]) throw new Error("Expected and actual old data differ: " + JSON.stringify(update.oldData) + " vs. " + JSON.stringify(oldData));
+					for (let i in oldData) if (update.oldData[i] != oldData[i]) throw new Error("Expected and actual old data differ " + JSON.stringify(update.oldData) + " vs. " + JSON.stringify(oldData));
 				}
 			}
 			if (!oldData && !data) continue; // no-op - trying to replace a non-existing object with nothing
@@ -255,7 +254,6 @@ class Database {
 		}
 
 		referrersDiff.mergeAllRequireExistingKeys();
-
 		
 		for (let id of objectsDiff.keys()) {
 			let oldData = this.objects.get(id);
@@ -299,7 +297,6 @@ class Database {
 			l(new Set(objectsDiff.keys()), queryOldData);
 		}
 		this.locked = false;
-		console.info("...successfully");
 	}
 	
 	get(id) {
