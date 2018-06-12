@@ -204,6 +204,135 @@ class MapView {
 }
 
 
+
+class MapLayer {
+	/**
+	 * @param tileSize size of a tile, e.g. 256x256
+	 * @param tileURLProvider function that computes a tile's URL from x,y,z (in tiles; z=0 being original/full resolution, z=1 half resolution etc.); this function should return null for unavailable tiles
+	 * @param minPersistentCacheLevel a level for which to cache all tiles (null = never). This quickly provides fallback tiles when the desired tiles are not available.
+	 */
+	constructor(tileSize, tileURLProvider, minPersistentCacheLevel, pixelOffset) {
+		this.tileSize = tileSize;
+		this.tileURLProvider = tileURLProvider;
+		this.minPersistentCacheLevel = minPersistentCacheLevel;
+		this.imageCache = new Map();
+		this.persistentImageCache = new Map();
+		this.pixelOffset = pixelOffset != null ? pixelOffset : 0;
+	}
+	// Images are arranged in layers
+	// For power-of-2 zoom levels just a single layer is shown
+	// For inbetween zoom levels 2 layers are blended with the finer layer on top (so gaps will show the lower layer)
+	// The bottommost visible layer must use lower-res versions of tiles when the desired resolution is not (or not yet) available
+	// When minPersistentCacheLevel is specified and zoom level is deeper, then another layer is shown underneath using its tiles as a fallback
+	initialise(mapView) {
+		this.container = document.createElement("div");
+		this.container.style.cssText = "position:absolute;left:0;top:0;right:0;bottom:0;";
+		this.mapView = mapView;
+		mapView.div.appendChild(this.container);
+		return Promise.resolve();
+	}
+	moveStart() {}
+	moveStep() {
+		// for now we just use the nearest power of 2
+		let z = Math.max(0, Math.round(-Math.log(this.mapView.viewZoom)/Math.log(2)));
+		// when no minPersistentCacheLevel was specified we take the chance to define it on our own, based on the initial zoom covering everything
+		if (this.minPersistentCacheLevel == null) this.minPersistentCacheLevel = z;
+
+		let zScale = Math.pow(2, z);
+		// draw slabs
+		let left = Math.max(0, Math.floor(this.mapView.viewLeft/zScale/this.tileSize));
+		let right = Math.min(Math.floor((this.mapView.mapWidth-1)/this.tileSize/zScale), Math.ceil((this.mapView.viewLeft+this.mapView.width/this.mapView.viewZoom)/zScale/this.tileSize));
+		let top = Math.max(0, Math.floor(this.mapView.viewTop/zScale/this.tileSize));
+		let bottom = Math.min(Math.floor((this.mapView.mapHeight-1)/this.tileSize/zScale), Math.ceil((this.mapView.viewTop+this.mapView.height/this.mapView.viewZoom)/zScale/this.tileSize));
+		
+		// we create a new image cache and then discard images from the old ones that weren't used
+		
+		let newImageCache = new Map();
+		let incompleteMap = new Map();
+		
+		let makeImage = url => {
+			let image = document.createElement("img");
+			image.onerror = function(e){ this.style.display="none"; console.log(e); };
+			image.src = url;
+			return image;
+		};
+		let addImage = (image, x, y, z) => {
+			let zScale = 1<<z;
+			image.style.position = "absolute";
+			image.style.left = (-this.mapView.viewLeft+(x*this.tileSize+this.pixelOffset)*zScale)*this.mapView.viewZoom + "px";
+			image.style.top = (-this.mapView.viewTop+(y*this.tileSize+this.pixelOffset)*zScale)*this.mapView.viewZoom + "px";
+			image.style.transformOrigin = "0 0";
+			image.style.transform = "scale(" + zScale*this.mapView.viewZoom + ")";
+			if (!image.complete) {
+				image.style.opacity = 0;
+				image.style.transition = "opacity 0.5s";
+				image.onload = function() { this.style.opacity = 1; };
+			}
+			this.container.insertBefore(image, this.container.firstChild);
+		};
+		while (this.container.lastChild) this.container.removeChild(this.container.lastChild);
+		
+		for (let y = top; y <= bottom; y++) for (let x = left; x <= right; x++) {
+			let url = this.tileURLProvider(x,y,z);
+			if (url == null) continue;
+			let image;
+			let persistent = this.minPersistentCacheLevel != null && z >= this.minPersistentCacheLevel;
+			if (persistent) {
+				image = this.persistentImageCache.get(url);
+			} else {
+				image = this.imageCache.get(url);
+			}
+			if (!image) {
+				image = makeImage(url);
+				if (persistent) {
+					this.persistentImageCache.set(url, image);
+				}
+			}
+			if (!persistent) {
+				newImageCache.set(url, image);
+			}
+			addImage(image,x,y,z);
+			if (!image.complete) {
+				incompleteMap.set(this.tileURLProvider(x>>1,y>>1,z+1), [x>>1,y>>1,z+1]);
+			}
+		}
+		// Whenever an image is missing we try to substitute with another image from the cache as an underlay.
+		for (let i = 0; i < 8 && incompleteMap.size; i++) {
+			let newIncompleteMap = new Map();
+			for (let url of incompleteMap.keys()) {
+				let coords = incompleteMap.get(url);
+				let x = coords[0], y = coords[1], z = coords[2];
+				if (!newIncompleteMap.has(url)) {
+					let persistent = this.minPersistentCacheLevel != null && z >= this.minPersistentCacheLevel;
+					let image;
+					if (persistent) {
+						image = this.persistentImageCache.get(url);
+						if (!image && z == this.minPersistentCacheLevel) {
+							image = makeImage(url);
+							this.persistentImageCache.set(url, image);
+						}
+					} else {
+						image = this.imageCache.get(url);
+						if (image) {
+							newImageCache.set(url, image);
+						}
+					}
+					if (image) {
+						addImage(image,x,y,z);
+					}
+					if (!image || !image.complete) {
+						newIncompleteMap.set(this.tileURLProvider(x>>1,y>>1,z+1), [x>>1,y>>1,z+1]);
+					}
+				}
+			}
+			incompleteMap = newIncompleteMap;
+		}
+		this.imageCache = newImageCache;
+	}
+	moveFinish() {}
+}
+
+
 class MapBasedCanvasLayer {
 	// This renders a view-sized canvas and updates tiles as needed.
 	// Tiles are 512x512 pixels each; as a performance optimisation multiple tiles can be combined.

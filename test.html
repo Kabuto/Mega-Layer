@@ -397,6 +397,11 @@ function init() {
 	let svgns = "http://www.w3.org/2000/svg";
 	let tracesSvgMap = new Map();
 	let tracesLayer = new SVGLayer();
+	
+	let lineWidth = 10;
+	let halfLineWidth = lineWidth*.5;
+	let lineWidthPx = lineWidth + "px";
+	let halfLineWidthPx = (lineWidth*.5) + "px";
 
 	// We use a SVG-based data backend for now
 	// This layer resembles all geometry that's currently stored in the database. Editing uses a different layer on top.
@@ -410,12 +415,12 @@ function init() {
 			switch (newData.type) {
 			case "point":
 				svgItem = document.createElementNS(svgns, 'circle');
-				svgItem.setAttribute('r', 50);
+				svgItem.setAttribute('r', halfLineWidth);
 				svgItem.setAttribute('style', 'fill: blue; stroke: none;' );
 				break;
 			case "line":
 				svgItem = document.createElementNS(svgns, 'line');
-				svgItem.setAttribute('style', 'stroke: blue; stroke-width: 100px;' );
+				svgItem.setAttribute('style', 'stroke: blue; stroke-width: ' + lineWidthPx + ';');
 				let p1 = database.get(newData.$point$1);
 				let p2 = database.get(newData.$point$2);
 				svgItem.setAttribute('x1', p1.x);
@@ -509,7 +514,7 @@ function init() {
 		
 		addDot(id, data) {
 			let dot = document.createElementNS(svgns, 'circle');
-			dot.setAttribute('r', 50);
+			dot.setAttribute('r', halfLineWidth);
 			dot.setAttribute('style', 'fill: none; stroke: red; stroke-width: 1px;' );
 			dot.setAttribute('cx', data.x);
 			dot.setAttribute('cy', data.y);
@@ -520,7 +525,7 @@ function init() {
 		// called upon activating this layer, followed up by a "mousemove" call to reset all mouse-over activity
 		activate() {
 			this.dot = document.createElementNS(svgns, 'circle');
-			this.dot.setAttribute('r', 50);
+			this.dot.setAttribute('r', halfLineWidth);
 			this.dot.setAttribute('style', 'fill: none; stroke: red; stroke-width: 5px;' );
 			editLayer.svg.appendChild(this.dot);
 			this.dotMap = new Map();
@@ -535,7 +540,7 @@ function init() {
 			this.line = null;
 		},
 		getPointAt(e, except) {
-			let nearestPoint = null, nearestPointDistance = 50;
+			let nearestPoint = null, nearestPointDistance = halfLineWidth;
 			for (let id of database.getIdsOfType("point")) {
 				let data = database.get(id);
 				let dist = distance(e,data);
@@ -547,7 +552,7 @@ function init() {
 			return nearestPoint;
 		},
 		getLineAt(e, except) {
-			let nearestLine = null, nearestLineDistance = 50, nearestPointOnLine = null;
+			let nearestLine = null, nearestLineDistance = halfLineWidth, nearestPointOnLine = null;
 			for (let id of database.getIdsOfType("line")) {
 				// only needs to cover the rect area, no rounded caps needed as they are already handled by getPointAt
 				let data = database.get(id);
@@ -796,7 +801,7 @@ function init() {
 				}
 				if (this.lastPoint && !this.line) {
 					this.line = document.createElementNS(svgns, 'line');
-					this.line.setAttribute('style', 'stroke: rgba(255,0,0,.5); stroke-width: 100px;' );
+					this.line.setAttribute('style', 'stroke: rgba(255,0,0,.5); stroke-width: ' + halfLineWidthPx + ';' );
 					editLayer.svg.appendChild(this.line);
 				}
 				if (!this.lastPoint && this.line) {
@@ -850,9 +855,16 @@ function init() {
 	
 	let currentTool = 0;
 	
+	let maplocation = localStorage.getItem("maplocation");
+	if (!maplocation) {
+		maplocation = prompt("Please tell me where to find map tiles", "");
+		localStorage.setItem("maplocation", maplocation);
+	}
+	
 	
 	let mapView = new MapView(1200, 800, 23429, 23351, [
-		new ImageLayer("example.jpg", 10),
+		//new ImageLayer("example.jpg", 10),
+		new MapLayer(256, (x,y,z) => maplocation + (15-z) + "/" + x + "_" + y + ".jpg"),
 		tracesLayer,
 		editLayer
 	], {

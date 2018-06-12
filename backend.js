@@ -60,7 +60,7 @@ class LocalStorageBackend {
 	}
 	persist() {
 		if (!this.dontPersist) {
-			localStorage.setItem("dieshot", JSON.stringify(this.database.getAllIds().map(id => {id: id, data: this.database.get(id)})));
+			localStorage.setItem("dieshot", JSON.stringify(this.database.getAllIds().map(id => ({id: id, data: this.database.get(id)}))));
 		}
 	}
 	update2(changes, inParallel) {
