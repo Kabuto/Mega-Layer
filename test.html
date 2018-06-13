@@ -3,6 +3,7 @@
 <head>
 <meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/>
 <title>Test</title>
+<script src="config.js"></script>
 <script src="mapview.js"></script>
 <script src="database.js"></script>
 <script src="backend.js"></script>
@@ -11,18 +12,9 @@
 
 
 function init() {
-	// TODO let the localStorage backend use a database too
 	let database = new Database();
 
-	
-	// Changes are not to be sent directly to the database object but to a wrapper which prepares committing, backend communication and stuff.
-	
-	// TODO undoing and then immediately redoing is easy to implement as this e.g. solves IDs of objects changing but it has the huge disadvantage of
-	// breaking edit operations since it looks like a required object was destroyed, cancelling the operation.
-	// Merging undoing and redoing to a single update won't work either because it won't merge an object with a client ID being replaced with an object with a server ID.
-	// Also, merging doesn't leave any safe place for publishing the ID mapping.
-	// Idea: try collecting updates across ID changes, forward another field to edit objects, named "ID change"...
-	
+	// Helper class that collects both changes and matching undo instructions
 	class ChangesCollector {
 		constructor() {
 			this.changes = new Map();
@@ -76,7 +68,7 @@ function init() {
 		}
 	}
 	
-	
+	// Changes are not to be sent directly to the database object but to a wrapper which prepares committing, backend communication and stuff
 	let databaseWrapper = {
 		// List of local changes that are waiting to be sent to the server
 		pending: new ChangesCollector(),
@@ -125,6 +117,10 @@ function init() {
 						initialised = true;
 						try {
 							this.database.modify(response.objects);
+							for (let id of this.database.getAllIds()) {
+								this.callListeners(null, this.database.get(id), id => null, id => this.database.get(id));
+							}
+							this.callGeneralListeners();
 							this.submit();
 							resolve();
 						} catch (e) {
@@ -398,11 +394,11 @@ function init() {
 	let tracesSvgMap = new Map();
 	let tracesLayer = new SVGLayer();
 	
-	let lineWidth = 10;
+	let lineWidth = 4;
 	let halfLineWidth = lineWidth*.5;
 	let lineWidthPx = lineWidth + "px";
 	let halfLineWidthPx = (lineWidth*.5) + "px";
-
+	
 	// We use a SVG-based data backend for now
 	// This layer resembles all geometry that's currently stored in the database. Editing uses a different layer on top.
 	// We might choose to replace this with a tile-based layer and do partial updates (even within tiles)
@@ -411,6 +407,10 @@ function init() {
 		let svgItem;
 		// Added
 		if (!oldData && !newData) return;
+		if ((newData || oldData).type == "layer") {
+			repaintLayers = true;
+			return;
+		}
 		if (!oldData) {
 			switch (newData.type) {
 			case "point":
@@ -495,21 +495,8 @@ function init() {
 	// press ctrl+1-0 for toggling visibility of that layer
 	// Idea: F keys for selecting tools
 	
-	// TODO undo functionality:
-	// * add another update collector layer named "current"
-	// * all actions are sent to this layer but also always(!) trigger a timeout (delay 0)
-	// * if the layer is not empty then its contents are sent to the staging block and an undo entry is created
-	// * if the submitter sees anything in the "current" layer then it also creates an undo entry first, emptying the "current" layer
-	// * we need to know which undo entries are sent to the server during a request so we can discard them again
-	// * undoing something can of course fail due to concurrent updates - if that happens, that entry is discarded and maybe the entry before can still be undone...
-	// * restrict the undo stack size to e.g. 100 entries to avoid memory overflow
-	// * drop merging to lines might be a bit over the top...
 	
-	
-	
-	
-	
-	let editTools = [{
+	let editTools = [{name: "none"}, {
 		name: "edit",
 		
 		addDot(id, data) {
@@ -530,7 +517,7 @@ function init() {
 			editLayer.svg.appendChild(this.dot);
 			this.dotMap = new Map();
 			for (let id of database.getIdsOfType("point")) {
-				this.addDot(id, this.database.get(id));
+				this.addDot(id, database.get(id));
 			}
 		},
 		deactivate() {
@@ -853,18 +840,12 @@ function init() {
 		name: "lines",
 	}];
 	
+	// 0 = no tool, to be switched later
 	let currentTool = 0;
 	
-	let maplocation = localStorage.getItem("maplocation");
-	if (!maplocation) {
-		maplocation = prompt("Please tell me where to find map tiles", "");
-		localStorage.setItem("maplocation", maplocation);
-	}
-	
-	
-	let mapView = new MapView(1200, 800, 23429, 23351, [
+	let mapView = new MapView(window.innerWidth, window.innerHeight, config.map.width, config.map.height, [
 		//new ImageLayer("example.jpg", 10),
-		new MapLayer(256, (x,y,z) => maplocation + (15-z) + "/" + x + "_" + y + ".jpg"),
+		new MapLayer(config.map.tileSize, config.map.tileProvider),
 		tracesLayer,
 		editLayer
 	], {
@@ -876,17 +857,41 @@ function init() {
 		dragend: (e) => {			if (editTools[currentTool].dragend) editTools[currentTool].dragend(e);			},
 	});
 	window.mapView = mapView;
+	window.addEventListener("resize", e => mapView.resize(window.innerWidth, window.innerHeight));
 
-	// escape aborts
 	window.addEventListener("keypress", e => {
 		console.log(e);
+		// escape aborts
 		if (e.keyCode == 27 && editTools[currentTool].abort) editTools[currentTool].abort();
-		if (e.keyCode == 46 && editTools[currentTool].delete) editTools[currentTool].delete()
-		if (e.charCode == 122 && e.ctrlKey && !e.shiftKey) databaseWrapper.undo();
-		if (e.charCode == 121 && e.ctrlKey && !e.shiftKey) databaseWrapper.redo();
+		// del deletes currently selected objects
+		else if (e.keyCode == 46 && editTools[currentTool].delete) editTools[currentTool].delete();
+		// Ctrl+Z/Y to undo/redo
+		else if (e.charCode == 122 && e.ctrlKey && !e.shiftKey) databaseWrapper.undo();
+		else if (e.charCode == 121 && e.ctrlKey && !e.shiftKey) databaseWrapper.redo();
+		// F7
+		else if (e.keyCode == 118) {
+			let newData = prompt("JSON data", localStorage.getItem("dieshot"));
+			if (newData != null) {
+				try {
+					JSON.parse(newData);
+					localStorage.setItem("dieshot", newData);
+					location.reload();
+				} catch (e) {
+					alert("Could not accept JSON data: " + e.message);
+				}
+			}
+		}
+		else return;
+		e.preventDefault();
 	});
 	
-	mapView.div.style.margin = "0 auto";
+	mapView.div.style.position = "fixed";
+	mapView.div.style.left = "0";
+	mapView.div.style.top = "0";
+	mapView.div.style.right = "0";
+	mapView.div.style.bottom = "0";
+	document.body.style.overflow = "hidden";
+	document.documentElement.style.overflow = "hidden";
 
 	let loadingHint = document.createElement("div");
 	loadingHint.textContent = "loading...";
@@ -905,64 +910,100 @@ function init() {
 		if (editTools[currentTool].change) editTools[currentTool].change(id, oldData, newData, oldDataSupplier); 
 	});
 
-	// The backend provides an interface between client and server
-	let backend = {
-		serverIDGenerator: 0,
-		snapshot: function() {
-			return Promise.resolve([]);
-		},
-		update: function(changes) {
-			// map all internal IDs
-			let internalToExternalIDMap = new Map();
-			let result = [];
-			let mapIDs = obj => {
-				if (!obj || obj === true) return obj;
-				obj = Object.assign({}, obj);
-				for (let k in obj) {
-					if (k[0] =="$" && obj[k] != null && obj[k] < 0) {
-						if (!internalToExternalIDMap.has(obj[k])) throw new Error();
-						obj[k] = internalToExternalIDMap.get(obj[k]);
-					}
-				}
-				return obj;
-			};
-			for (let change of changes) {
-				if (!change.oldData && !change.data) {
-					continue;
-				}
-				let id = change.id;
-				if (id == null || id < 0) {
-					if (!change.oldData && change.data) {
-						// insert - don't assume reviving
-						id = ++this.serverIDGenerator;
-						if (change.id != null) {
-							internalToExternalIDMap.set(change.id, id);
-						}
-					} else {
-						// update/delete
-						if (change.id != null) {
-							id = internalToExternalIDMap.get(change.id);
-							if (id == null) throw new Error(JSON.stringify(changes));
-						}
-					}
-				}
-				result.push({id: id, oldData: mapIDs(change.oldData), data: mapIDs(change.data)});
-			}
-			
-			return Promise.resolve({
-				objects: result,
-				clientToServerIDMap: internalToExternalIDMap
-			});
-		},
-		difference: function() {
-			return Promise.resolve([]);
-		}
-	};
-	
 	databaseWrapper.init(callback => new LocalStorageBackend(callback)).then(() => {
 		if (loadingHint.parentNode) loadingHint.parentNode.removeChild(loadingHint);
-		editTools[currentTool].activate();
+		if (editTools[currentTool].deactivate) editTools[currentTool].deactivate();
+		currentTool = 1;
+		if (editTools[currentTool].activate) editTools[currentTool].activate();
 	}).catch(e => console.error(e));
+
+	
+	
+	let layerToolbox = document.createElement("div");
+	layerToolbox.style.cssText = "position:fixed;right:10px;top:10px;border:1px solid #666;background:#999;";
+	document.body.appendChild(layerToolbox);
+	
+	let hiddenLayers = new Set();
+	
+	let activeLayer = null;
+	let repaintLayers = false;
+	let repaintLayersFunc = () => {
+		if (activeLayer != null && database.get(activeLayer) && !repaintLayers) return;
+		repaintLayers = false;
+		if (!database.get(activeLayer)) activeLayer = null;
+		let layers = [...database.getIdsOfType("layer")].map(id => [id, database.get(id)]).sort((a,b) => (a[1].order||0)-(b[1].order||0));
+		if (activeLayer == null && layers.length) {
+			activeLayer = layers[0][0];
+		}
+		for (let k of hiddenLayers) if (!database.get(k)) hiddenLayers.delete(k);
+		hiddenLayers.delete(activeLayer);
+		
+		while (layerToolbox.lastChild) layerToolbox.removeChild(layerToolbox.lastChild);
+		for (let [id, data] of layers) {
+			let p = document.createElement("div");
+			let visibilityControl = p.appendChild(document.createElement("span"));
+			visibilityControl.textContent = "👁";
+			if (hiddenLayers.has(id)) visibilityControl.style.opacity = 0.3;
+			visibilityControl.onclick = () => {
+				if (hiddenLayers.has(id)) hiddenLayers.delete(id); else hiddenLayers.add(id);
+				repaintLayers = true;
+				repaintLayersFunc();
+			};
+			p.appendChild(visibilityControl);
+			/*let viewExclusivelyControl = p.appendChild(document.createElement("span"));
+			viewExclusivelyControl.textContent = "#";
+			if (hiddenLayers.size == layers.length-1 && !hiddenLayers.has(id)) {
+				viewExclusivelyControl.onclick = () => {
+					hiddenLayers = new Set();
+					setActiveLayer(id, true);
+				};
+			} else {
+				viewExclusivelyControl.style.opacity = 0.3;
+				viewExclusivelyControl.onclick = () => {
+					hiddenLayers = new Set(layers.map(l => l[0]));
+					hiddenLayers.delete(id);
+					setActiveLayer(id, true);
+				};
+			}
+			p.appendChild(viewExclusivelyControl);*/
+			let nameControl = p.appendChild(document.createElement("span"));
+			nameControl.textContent = data.name;
+			nameControl.onclick = () => setActiveLayer(id);
+			if (id == activeLayer) { p.className = "active"; nameControl.style.fontWeight = "bold"; }
+			p.appendChild(nameControl);
+			layerToolbox.appendChild(p);
+		}
+	};
+	let setActiveLayer = (id, force) => {
+		if (id != null && (!database.get(id) || database.get(id).type != "layer")) throw new Error();
+		if (id == activeLayer && !force) return;
+		activeLayer = id;
+		repaintLayers = true;
+		repaintLayersFunc();
+	};
+	window.addEventListener("keydown", e => {
+		if (e.keyCode < 48 || e.keyCode > 57) return;
+		let num = (e.keyCode+1)%10;
+		let layers = [...database.getIdsOfType("layer")].map(id => [id, database.get(id)]).sort((a,b) => (a[1].order||0)-(b[1].order||0));
+		if (num >= layers.length) return;
+		let id = layers[num][0];
+		if (e.ctrlKey) {
+			if (hiddenLayers.has(id)) hiddenLayers.delete(id); else hiddenLayers.add(id);
+			repaintLayers = true;
+			repaintLayersFunc();
+		} /*else if (e.shiftKey) {
+			hiddenLayers = (hiddenLayers.size == layers.length-1 && !hiddenLayers.has(id)) ? new Set() : new Set(layers.map(l => l[0]));
+			hiddenLayers.delete(id);
+			setActiveLayer(id, true);
+		}*/ else {
+			setActiveLayer(id);
+		}
+		e.preventDefault();
+	});
+	
+
+	
+	databaseWrapper.addGeneralUpdateListener(repaintLayersFunc);
 }
 </script>
 </head>

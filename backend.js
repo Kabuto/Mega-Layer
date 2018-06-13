@@ -33,16 +33,18 @@ class LocalStorageBackend {
 		this.responses = [];
 		this.dontPersist = dontPersist;
 		if (prevState == null) prevState = localStorage.getItem("dieshot");
+		let changes;
 		if (prevState) {
-			let changes = JSON.parse(prevState);
+			changes = JSON.parse(prevState);
 			this.database.modify(changes);
-			this.responses.push(changes);
-			this.serverIDGenerator = changes.map(entry => entry.id).filter(entry.id).reduce(Math.max, 0);
+			this.serverIDGenerator = changes.map(entry => entry.id).filter(entry => entry).reduce((a,b) => Math.max(a,b), 0);
 		} else {
-			this.responses.push([]);
+			localStorage.setItem("dieshot", "[]");
+			alert("This web app automatically saves your edit actions on your computer. Please check that your browser does not discard them when you restart it so you don't accidentally lose your edit actions.");
+			changes = [];
 			this.serverIDGenerator = 0;
 		}
-		setTimeout(() => this.callback(this.responses.shift()), this.delay);
+		this.doCallback({objects:changes});
 	}
 	update(changes) {
 		this.update2(changes, false);
@@ -60,7 +62,7 @@ class LocalStorageBackend {
 	}
 	persist() {
 		if (!this.dontPersist) {
-			localStorage.setItem("dieshot", JSON.stringify(this.database.getAllIds().map(id => ({id: id, data: this.database.get(id)}))));
+			localStorage.setItem("dieshot", JSON.stringify([...this.database.getAllIds()].map(id => ({id: id, data: this.database.get(id)}))));
 		}
 	}
 	update2(changes, inParallel) {

@@ -21,34 +21,47 @@
 		
 */
 class MapView {
-	constructor(width, height, mapWidth, mapHeight, layers, mouseListener) {
+	computeViewConstraints(width, height) {
 		this.width = width;
 		this.height = height;
+		// zoom = size of a pixel on screen
+		let minViewZoom = Math.min(width/this.mapWidth, height/this.mapHeight);
+		this.minViewZoom = 1;
+		while (this.minViewZoom > minViewZoom) this.minViewZoom /= 2;
+		
+		// left/top = left/top map pixel on screen
+		this.viewXMinPixel = (width-this.mapWidth*this.minViewZoom)/2;
+		this.viewXMaxPixel = (width+this.mapWidth*this.minViewZoom)/2;
+		this.viewYMinPixel = (height-this.mapHeight*this.minViewZoom)/2;
+		this.viewYMaxPixel = (height+this.mapHeight*this.minViewZoom)/2;
+	}
+	resize(width, height) {
+		this.div.style.width = width + "px";
+		this.div.style.height = height + "px";
+		this.viewLeft -= (width-this.width)/2/this.viewZoom;
+		this.viewTop -= (height-this.height)/2/this.viewZoom;
+		this.computeViewConstraints(width, height);
+		this.viewZoom = Math.max(this.viewZoom, this.minViewZoom);
+		this.setViewCoords(this.viewLeft, this.viewTop);
+		this.redraw();
+	}
+	constructor(width, height, mapWidth, mapHeight, layers, mouseListener) {
 		this.mapWidth = mapWidth;
 		this.mapHeight = mapHeight;
 		
-		// zoom = size of a pixel on screen
-		let minViewZoom = Math.min(width/mapWidth, height/mapHeight);
 		this.maxViewZoom = 4;
-		this.minViewZoom = 1;
-		while (this.minViewZoom > minViewZoom) this.minViewZoom /= 2;
+
+		this.computeViewConstraints(width, height);
+
 		this.viewZoom = this.minViewZoom;
-		
-		// left/top = left/top map pixel on screen
-		this.viewLeft = (mapWidth-width/this.viewZoom)/2;
-		this.viewTop = (mapHeight-height/this.viewZoom)/2;
-		
-		this.viewXMinPixel = -this.viewLeft*this.viewZoom;
-		this.viewXMaxPixel = (mapWidth-this.viewLeft)*this.viewZoom;
-		this.viewYMinPixel = -this.viewTop*this.viewZoom;
-		this.viewYMaxPixel = (mapHeight-this.viewTop)*this.viewZoom;
+		this.viewLeft = -this.viewXMinPixel/this.minViewZoom;
+		this.viewTop = -this.viewYMinPixel/this.minViewZoom;
 
 		let div = document.createElement("div");
 		div.style.position = "relative";
 		div.style.width = width + "px";
 		div.style.height = height + "px";
 		div.style.overflow = "hidden";
-		div.style.boxShadow = "1px 1px 3px rgba(0,0,0,.5)";	
 		this.div = div;
 		this.mouseListener = mouseListener
 		
@@ -259,6 +272,7 @@ class MapLayer {
 		let addImage = (image, x, y, z) => {
 			let zScale = 1<<z;
 			image.style.position = "absolute";
+			// FIXME positioning images like this leads to white seam boundaries in Firefox and using Math.round doesn't fix that
 			image.style.left = (-this.mapView.viewLeft+(x*this.tileSize+this.pixelOffset)*zScale)*this.mapView.viewZoom + "px";
 			image.style.top = (-this.mapView.viewTop+(y*this.tileSize+this.pixelOffset)*zScale)*this.mapView.viewZoom + "px";
 			image.style.transformOrigin = "0 0";
