@@ -18,6 +18,18 @@
  
 /**
  * This is the simplemost possible backend. It doesn't hold any data; all it does is generating server IDs for client IDs that were submitted.
+ *
+ * TODO what about compressed storage:
+ *
+ * Group objects by what their type is, whether their ID is referenced and what set of keys they use.
+ * 
+ * Renumber IDs of objects that have their IDs referenced by sorting them in ascending order, within the supergroup of objects of identical type, omitting IDs of objects that are not referenced (since referrers are unique per target type).
+ *
+ * Store each such group as an array: boolean (ID used or not?), string (type), number (number of keys besides type), ...string (all keys besides type), values of actual objects, one after another.
+ *
+ * Limit precision of floating point numbers by premultiplying and then rounding to integer, but store such premultiplication factors within compressed data as well.
+ *
+ * Such a treatment should reduce the size of stored data to 1/4.
  */
 class LocalStorageBackend {
 	/**

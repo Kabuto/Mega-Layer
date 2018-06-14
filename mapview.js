@@ -65,7 +65,7 @@ class MapView {
 		this.div = div;
 		this.mouseListener = mouseListener
 		
-		this.config = {
+		this.settings = {
 			// true = mouse wheel always zooms (map-like), false = mouse wheel scrolls Y without keys pressed, scrolls X with shift key, scrolls Y with ctrl key
 			wheelZoom: true,
 			// a mouse button that, while held down, allows dragging the map around (can be set to left but then would disable rubberband; set to null to disable dragging - fast looking around is also possible through zooming)
@@ -125,7 +125,7 @@ class MapView {
 			let xy = getCoords(e);
 			let mapX = xy.x;
 			let mapY = xy.y;
-			if (this.config.wheelZoom || !this.config.wheelZoom && e.ctrlKey) {
+			if (this.settings.wheelZoom || !this.settings.wheelZoom && e.ctrlKey) {
 				if (e.deltaY < 0 && this.viewZoom < this.maxViewZoom) {
 					this.viewZoom *= 2;
 				} else if (e.deltaY > 0 && this.viewZoom > this.minViewZoom) {
@@ -155,7 +155,7 @@ class MapView {
 		let dragstartCoords = null;
 		let mousemoveFunc = e => {
 			e.preventDefault();
-			if (pressedButtons && dragstartCoords && Math.pow(dragstartCoords.x-e.clientX,2)+Math.pow(dragstartCoords.y-e.clientY,2) >= this.config.dragThreshold) {
+			if (pressedButtons && dragstartCoords && Math.pow(dragstartCoords.x-e.clientX,2)+Math.pow(dragstartCoords.y-e.clientY,2) >= this.settings.dragThreshold) {
 				clickHandlers = [];
 				callEventHandler("dragstart", e, dragstartCoords.map, null, pressedButtons);
 				dragstartCoords = null;
@@ -204,8 +204,8 @@ class MapView {
 		this.setViewCoords(this.viewLeft+x/this.viewZoom, this.viewTop+y/this.viewZoom);
 	}
 	setViewCoords(x,y) {
-		this.viewLeft = Math.max(-this.viewXMinPixel/this.viewZoom, Math.min(this.mapWidth-this.viewXMaxPixel/this.viewZoom, x));
-		this.viewTop = Math.max(-this.viewYMinPixel/this.viewZoom, Math.min(this.mapHeight-this.viewYMaxPixel/this.viewZoom, y));
+		this.viewLeft = Math.round(Math.max(-this.viewXMinPixel/this.viewZoom, Math.min(this.mapWidth-this.viewXMaxPixel/this.viewZoom, x))*this.viewZoom)/this.viewZoom;
+		this.viewTop = Math.round(Math.max(-this.viewYMinPixel/this.viewZoom, Math.min(this.mapHeight-this.viewYMaxPixel/this.viewZoom, y))*this.viewZoom)/this.viewZoom;
 	}
 	redraw() {
 		for (let l of this.layers) {

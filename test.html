@@ -7,6 +7,48 @@
 <script src="mapview.js"></script>
 <script src="database.js"></script>
 <script src="backend.js"></script>
+<style>
+	.data-layer-point {
+		fill: black;
+		stroke: none;
+	}
+	.data-layer-line {
+		stroke: black;
+	}
+	
+	.view-tool-hovering {
+		opacity: 0.7;
+	}
+	.view-tool-point {
+		stroke: none;
+		fill: white;
+	}
+	.view-tool-line {
+		stroke: white;
+	}
+	
+	.edit-tool-point {
+		fill: none;
+		stroke: white;
+		stroke-width: 1px;
+	}
+	.edit-tool-marker {
+		fill: none;
+		stroke: white;
+		stroke-width: 1px;
+	}
+	.edit-tool-marker-mousedown {
+		fill: black;
+	}
+	.edit-tool-line {
+		stroke: rgba(255,255,255,.5);
+	}
+	
+	body { background: #444; }
+
+
+</style>
+
 <script>
 
 
@@ -399,6 +441,37 @@ function init() {
 	let lineWidthPx = lineWidth + "px";
 	let halfLineWidthPx = (lineWidth*.5) + "px";
 	
+	let lineGroup = document.createElementNS(svgns, "g");
+	tracesLayer.svg.appendChild(lineGroup);
+	let pointGroup = document.createElementNS(svgns, "g");
+	tracesLayer.svg.appendChild(pointGroup);
+
+	let updateLayers = () => {
+		let layers = [...database.getIdsOfType("layer")].map(id => [id, database.get(id)]).sort((a,b) => (a[1].order||0)-(b[1].order||0)).map(entry => entry[0]);
+		let lastLayerSvgItem = null;
+		for (let layer of layers) {
+			let layerSvgItem = tracesSvgMap.get(layer);
+			if (!layerSvgItem) {
+				layerSvgItem = document.createElementNS(svgns, "g");
+				tracesSvgMap.set(layer, layerSvgItem);
+				lineGroup.appendChild(layerSvgItem);
+			}
+			if (layerSvgItem.previousSibling != lastLayerSvgItem) {
+				lineGroup.insertBefore(layerSvgItem, lastLayerSvgItem ? lastLayerSvgItem.nextSibling : lineGroup.firstChild);
+			}
+			lastLayerSvgItem = layerSvgItem;
+		}
+	};
+	
+	let appendSVGItem = (parent, name, attrs, style) => {
+		let item = document.createElementNS(svgns, name);
+		if (attrs) for (let i in attrs) if (attrs[i] != null) item.setAttribute(i, attrs[i]);
+		if (style) for (let i in style) if (style[i] != null) item.style[i] = style[i];
+		if (parent) parent.appendChild(item);
+		return item;
+	};
+	
+	
 	// We use a SVG-based data backend for now
 	// This layer resembles all geometry that's currently stored in the database. Editing uses a different layer on top.
 	// We might choose to replace this with a tile-based layer and do partial updates (even within tiles)
@@ -414,24 +487,25 @@ function init() {
 		if (!oldData) {
 			switch (newData.type) {
 			case "point":
-				svgItem = document.createElementNS(svgns, 'circle');
-				svgItem.setAttribute('r', halfLineWidth);
-				svgItem.setAttribute('style', 'fill: blue; stroke: none;' );
+				svgItem = appendSVGItem(pointGroup, "circle", {class: "data-layer-point", r: halfLineWidth});
 				break;
 			case "line":
-				svgItem = document.createElementNS(svgns, 'line');
-				svgItem.setAttribute('style', 'stroke: blue; stroke-width: ' + lineWidthPx + ';');
+				let layer = database.get(newData.$layer$);
+				let layerObj = null;
+				if (layer) {
+					layerObj = tracesSvgMap.get(newData.$layer$);
+					if (!layerObj) {
+						updateLayers();
+						layerObj = tracesSvgMap.get(newData.$layer$);
+					}
+				}
 				let p1 = database.get(newData.$point$1);
 				let p2 = database.get(newData.$point$2);
-				svgItem.setAttribute('x1', p1.x);
-				svgItem.setAttribute('y1', p1.y);
-				svgItem.setAttribute('x2', p2.x);
-				svgItem.setAttribute('y2', p2.y);
+				svgItem = appendSVGItem(layerObj || lineGroup, "line", {class: "data-layer-line", x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y}, {stroke: layer && layer.color || "black", strokeWidth: lineWidthPx});
 				break;
 			default:
 				throw new Error("Unsupported SVG item");
 			}
-			tracesLayer.svg.appendChild(svgItem);
 			tracesSvgMap.set(id, svgItem);
 		} else {
 			svgItem = tracesSvgMap.get(id);
@@ -473,6 +547,33 @@ function init() {
 				line.setAttribute('y1', p1.y);
 				line.setAttribute('x2', p2.x);
 				line.setAttribute('y2', p2.y);
+				if (oldData && oldData.$layer$ != newData.$layer$) {
+					let layer = database.get(newData.$layer$);
+					let layerObj = null;
+					if (layer) {
+						layerObj = tracesSvgMap.get(newData.$layer$);
+						if (!layerObj) {
+							updateLayers();
+							layerObj = tracesSvgMap.get(newData.$layer$);
+						}
+					}
+					line.style.stroke = layer && layer.color || "black";
+					(layerObj || lineGroup).appendChild(line);
+				}
+				break;
+			case "layer":
+				updateLayers();
+				if (oldData) {
+					for (let id2 of database.getReferrers(id)) {
+						let data = database.get(id2);
+						if (data.type == "line") {
+							let line = tracesSvgMap.get(id2);
+							if (line) {
+								line.style.stroke = newData.color || "black";
+							}
+						}
+					}
+				}
 				break;
 			}
 		}
@@ -484,7 +585,51 @@ function init() {
 		let dx = a.x-b.x;
 		let dy = a.y-b.y;
 		return Math.sqrt(dx*dx+dy*dy);
-	}
+	};
+	
+	let getPointAt = function(e, except) {
+		let nearestPoint = null, nearestPointDistance = halfLineWidth;
+		for (let id of database.getIdsOfType("point")) {
+			let data = database.get(id);
+			let dist = distance(e,data);
+			if (dist < nearestPointDistance && id != except) {
+				nearestPointDistance = dist;
+				nearestPoint = id;
+			}
+		}
+		return nearestPoint;
+	};
+	
+	let getLineAt = function(e, except) {
+		let nearestLine = null, nearestLineDistance = halfLineWidth, nearestPointOnLine = null;
+		for (let id of database.getIdsOfType("line")) {
+			// only needs to cover the rect area, no rounded caps needed as they are already handled by getPointAt
+			let data = database.get(id);
+			if (data.$point$1 == except || data.$point$2 == except) continue;
+			let a = database.get(data.$point$1);
+			let b = database.get(data.$point$2);
+			let dx = b.x-a.x;
+			let dy = b.y-a.y;
+			if (dx == 0 && dy == 0) continue;
+			let dxa = a.x-e.x;
+			let dya = a.y-e.y;
+			// distance to line, assuming its length being infinite
+			let dist = Math.abs(dx*dya - dy*dxa)/Math.sqrt(dx*dx+dy*dy);
+			let pointOnLine = -(dx*dxa + dy*dya)/(dx*dx + dy*dy);
+			if (dist < nearestLineDistance && pointOnLine > 0 && pointOnLine < 1) {
+				nearestLineDistance = dist;
+				nearestLine = id;
+				nearestPointOnLine = pointOnLine;
+			}
+		}
+		if (nearestLine == null) return null;
+		let data = database.get(nearestLine);
+		let a = database.get(data.$point$1);
+		let b = database.get(data.$point$2);
+		return ({id: nearestLine, x: a.x+(b.x-a.x)*nearestPointOnLine, y: a.y+(b.y-a.y)*nearestPointOnLine});
+	};
+
+	
 	
 	// Next up: edit tools
 	
@@ -495,26 +640,136 @@ function init() {
 	// press ctrl+1-0 for toggling visibility of that layer
 	// Idea: F keys for selecting tools
 	
+	// TODO rubberband for edit tool on mousedown when not in line mode?
 	
 	let editTools = [{name: "none"}, {
-		name: "edit",
+		name: "view",
+		
+		activate() {
+			this.hoveringGroup = appendSVGItem(editLayer.svg, "g");
+			this.selectedGroup = appendSVGItem(editLayer.svg, "g");
+		},
+		
+		deactivate() {
+			while (editLayer.svg.lastChild) editLayer.svg.removeChild(editLayer.svg.lastChild);
+			this.selected = null;
+			this.hovering = null;
+			this.selectedGroup = null;
+			this.hoveringGroup = null;
+			this.lastMousemoveCoords = null;
+		},
+		
+		mousedown(e) {
+			if (e.button == 0) {
+				this.selected = this.hovering;
+				this.markAllOf(this.selected, this.selectedGroup, " view-tool-selected");
+			}
+		},
+		
+		mousemove(e) {
+			// TODO add rubberband selection (also for edit tool) - but here including all overlapped items, not just fully contained items
+			// TODO allow rubberband to select multiple objects
+			// TODO allow ctrl-click
+			// TODO indicate hovered objects even when they are selected
+			
+			// TODO for edit tool, allow moving lines to different layers (context menu)
+			
+			// TODO add settings menu (loading / saving of data / changing settings)
+			let point = getPointAt(e);
+			let line = null;
+			if (point) {
+				let pointData = database.get(point);
+				let nearestLineDistance = 0;
+				for (let ref of database.getReferrers(point)) {
+					let data = database.get(ref);
+					if (data.type != "line") continue;
+					let otherPointData = database.get(point == data.$point$1 ? data.$point$2 : data.$point$1);
+					let dist = distance(pointData, otherPointData);
+					let test = {
+						x: pointData.x + (otherPointData.x-pointData.x)/dist,
+						y: pointData.y + (otherPointData.y-pointData.y)/dist
+					};
+					let dist2 = distance(test, e);
+					if (line == null || dist2 < nearestLineDistance) {
+						line = ref;
+						nearestLineDistance = dist2;
+					}
+				}
+			}
+			if (line == null) {
+				let lineInfo = getLineAt(e);
+				line = lineInfo ? lineInfo.id : null;
+			}
+			if (line == this.hovering) return;
+			this.hovering = line;
+			this.markAllOf(line, this.hoveringGroup, " view-tool-hovering");
+			this.lastMousemoveCoords = {x: e.x, y: e.y};
+		},
+		
+		markAllOf(line, group, classPostfix) {
+			this.clear(group);
+			if (line == null) return;
+			// scan network for lines
+			let ldata = database.get(line);
+			let queue = [ldata.$point$1, ldata.$point$2];
+			let scanned = new Set([line, ldata.$point$1, ldata.$point$2]);
+			while (queue.length) {
+				for (let ref of database.getReferrers(queue.shift())) {
+					if (scanned.has(ref)) continue;
+					scanned.add(ref);
+					let data = database.get(ref);
+					if (data.type != "line") continue;
+					if (!scanned.has(data.$point$1)) {
+						scanned.add(data.$point$1);
+						queue.push(data.$point$1);
+					}
+					if (!scanned.has(data.$point$2)) {
+						scanned.add(data.$point$2);
+						queue.push(data.$point$2);
+					}
+				}
+			}
+			// mark
+			for (let id of scanned) {
+				let data = database.get(id);
+				switch (data.type) {
+				case "point":
+					appendSVGItem(group, "circle", {class: "view-tool-point" + classPostfix, r: halfLineWidth, cx: data.x, cy: data.y});
+					break;
+				case "line":
+					let p1 = database.get(data.$point$1);
+					let p2 = database.get(data.$point$2);
+					appendSVGItem(group, "line", {class: "view-tool-line" + classPostfix, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y}, {strokeWidth: lineWidthPx});
+					break;
+				}
+			}
+		},
+		
+		change3() {
+			if (!this.selected || !this.database.get(this.selected)) {
+				this.selected = null;
+				this.clear(this.selectedGroup);
+			}
+			this.hovering = null;
+			this.clear(this.hoveringGroup);
+			if (this.lastMousemoveCoords) this.mousemove(this.lastMousemoveCoords);
+		},
+		
+		clear(node) {
+			while (node.lastChild) node.removeChild(node.lastChild);
+		}
+		
+	}, {
+		name: "lines",
 		
 		addDot(id, data) {
-			let dot = document.createElementNS(svgns, 'circle');
-			dot.setAttribute('r', halfLineWidth);
-			dot.setAttribute('style', 'fill: none; stroke: red; stroke-width: 1px;' );
-			dot.setAttribute('cx', data.x);
-			dot.setAttribute('cy', data.y);
-			editLayer.svg.appendChild(dot);
+			let dot = appendSVGItem(editLayer.svg, "circle", {class: "edit-tool-point", r: halfLineWidth, cx: data.x, cy: data.y});
 			this.dotMap.set(id, dot);
 		},
 		
 		// called upon activating this layer, followed up by a "mousemove" call to reset all mouse-over activity
 		activate() {
-			this.dot = document.createElementNS(svgns, 'circle');
-			this.dot.setAttribute('r', halfLineWidth);
-			this.dot.setAttribute('style', 'fill: none; stroke: red; stroke-width: 5px;' );
-			editLayer.svg.appendChild(this.dot);
+			this.dot = appendSVGItem(editLayer.svg, "circle", {class: "edit-tool-marker", r: halfLineWidth});
 			this.dotMap = new Map();
 			for (let id of database.getIdsOfType("point")) {
 				this.addDot(id, database.get(id));
@@ -526,50 +781,10 @@ function init() {
 			this.dotMap = null;
 			this.line = null;
 		},
-		getPointAt(e, except) {
-			let nearestPoint = null, nearestPointDistance = halfLineWidth;
-			for (let id of database.getIdsOfType("point")) {
-				let data = database.get(id);
-				let dist = distance(e,data);
-				if (dist < nearestPointDistance && id != except) {
-					nearestPointDistance = dist;
-					nearestPoint = id;
-				}
-			}
-			return nearestPoint;
-		},
-		getLineAt(e, except) {
-			let nearestLine = null, nearestLineDistance = halfLineWidth, nearestPointOnLine = null;
-			for (let id of database.getIdsOfType("line")) {
-				// only needs to cover the rect area, no rounded caps needed as they are already handled by getPointAt
-				let data = database.get(id);
-				if (data.$point$1 == except || data.$point$2 == except) continue;
-				let a = database.get(data.$point$1);
-				let b = database.get(data.$point$2);
-				let dx = b.x-a.x;
-				let dy = b.y-a.y;
-				if (dx == 0 && dy == 0) continue;
-				let dxa = a.x-e.x;
-				let dya = a.y-e.y;
-				// distance to line, assuming its length being infinite
-				let dist = Math.abs(dx*dya - dy*dxa)/Math.sqrt(dx*dx+dy*dy);
-				let pointOnLine = -(dx*dxa + dy*dya)/(dx*dx + dy*dy);
-				if (dist < nearestLineDistance && pointOnLine > 0 && pointOnLine < 1) {
-					nearestLineDistance = dist;
-					nearestLine = id;
-					nearestPointOnLine = pointOnLine;
-				}
-			}
-			if (nearestLine == null) return null;
-			let data = database.get(nearestLine);
-			let a = database.get(data.$point$1);
-			let b = database.get(data.$point$2);
-			return ({id: nearestLine, x: a.x+(b.x-a.x)*nearestPointOnLine, y: a.y+(b.y-a.y)*nearestPointOnLine});
-		},
 		getPoint(e, except) {
-			let nearestPoint = this.getPointAt(e, except);
+			let nearestPoint = getPointAt(e, except);
 			if (nearestPoint) return ({type: "point", coords: database.get(nearestPoint), point: nearestPoint, create: () => nearestPoint});
-			let nearestLine = except != null || nearestPoint ? null : this.getLineAt(e, except);
+			let nearestLine = except != null || nearestPoint ? null : getLineAt(e, except);
 			if (nearestLine) return ({type: "line", coords: nearestLine, line: nearestLine, create: () => {
 				let id = databaseWrapper.insert({type: "point", x: nearestLine.x, y: nearestLine.y});
 				let data = database.get(nearestLine.id);
@@ -592,16 +807,20 @@ function init() {
 			// * modifying any involved object during mousedown will abort
 			// -> create dummy on mousedown, don't create the actual point
 			if (e.button == 0) {
-				databaseWrapper.setUncommitted();
 				// initiate point action
 				this.point = this.getPoint(e);
+				if ((activeLayer == null || hiddenLayers.has(activeLayer)) && this.point.type != "point") {
+					this.point = null;
+					return;
+				}				
+				
+				databaseWrapper.setUncommitted();
 				this.pointId = this.point.create();
 				this.pointData = database.get(this.pointId);
 				this.startPos = {x: e.x, y: e.y};
 				// draw point insertion placeholder
 				this.state = "mousedown";
-				console.log("state: " + this.state);
-				this.dot.setAttribute('style', 'fill: blue; stroke: red; stroke-width: 5px;' );
+				this.dot.setAttribute("class", "edit-tool-marker edit-tool-marker-mousedown");
 				this.mousemove(e);
 			}
 		},
@@ -618,7 +837,7 @@ function init() {
 			this.pointId = null;
 			this.pointData = null;
 			this.startPos = null;
-			this.dot.setAttribute('style', 'fill: none; stroke: red; stroke-width: 5px;' );
+			this.dot.setAttribute("class", "edit-tool-marker");
 			this.lastPoint = null;
 			if (this.line) {
 				this.line.parentNode.removeChild(this.line);
@@ -634,7 +853,7 @@ function init() {
 				this.pointId = null;
 				this.pointData = null;
 				this.startPos = null;
-				this.dot.setAttribute('style', 'fill: none; stroke: red; stroke-width: 5px;' );
+				this.dot.setAttribute("class", "edit-tool-marker");
 				this.lastPoint = null;
 				if (this.line) {
 					this.line.parentNode.removeChild(this.line);
@@ -670,16 +889,8 @@ function init() {
 				return;
 			}
 
-			let nearestPoint = this.getPointAt(e);
-			let nearestLine = nearestPoint ? null : this.getLineAt(e);
-			let pos;
-			if (nearestPoint != null) {
-				pos = database.get(nearestPoint);
-			} else if (nearestLine != null) {
-				pos = nearestLine;
-			} else {
-				pos = e;
-			}
+			
+			let pos = this.getPoint(e).coords;
 			this.dot.setAttribute('cx', pos.x);
 			this.dot.setAttribute('cy', pos.y);
 			if (this.line) {
@@ -697,7 +908,7 @@ function init() {
 		mouseup(e) {
 			this.checkAbort();
 			if (e.button == 0 && (this.state == "mousedown" || this.state == "dragging")) {
-				this.dot.setAttribute('style', 'fill: none; stroke: red; stroke-width: 5px;' );
+				this.dot.setAttribute("class", "edit-tool-marker");
 				let oldState = this.state;
 				this.state = null;
 				console.log("state: " + this.state);
@@ -774,22 +985,20 @@ function init() {
 				
 				
 				let lastPoint = this.lastPoint;
-				this.lastPoint = oldState == "mousedown" ? id : null;
+				this.lastPoint = oldState == "mousedown" && activeLayer != null && !hiddenLayers.has(activeLayer) ? id : null;
 				if (lastPoint) {
 					// draw line
 					let duplicate = false;
 					if (lastPoint != id) {
 						// don't insert the same line twice
-						duplicate = !insertLineIfNoDuplicate({type: "line", $point$1: lastPoint, $point$2: id});
+						duplicate = !insertLineIfNoDuplicate({type: "line", $point$1: lastPoint, $point$2: id, $layer$: activeLayer});
 					}
 					if (duplicate || point.type != "new") {
 						this.lastPoint = null;
 					}
 				}
 				if (this.lastPoint && !this.line) {
-					this.line = document.createElementNS(svgns, 'line');
-					this.line.setAttribute('style', 'stroke: rgba(255,0,0,.5); stroke-width: ' + halfLineWidthPx + ';' );
-					editLayer.svg.appendChild(this.line);
+					this.line = appendSVGItem(editLayer.svg, "line", {class: "edit-tool-line"}, {strokeWidth: halfLineWidthPx});
 				}
 				if (!this.lastPoint && this.line) {
 					this.line.parentNode.removeChild(this.line);
@@ -836,16 +1045,16 @@ function init() {
 				this.addDot(id, newData);
 			}
 		}
-	}, {
-		name: "lines",
 	}];
 	
 	// 0 = no tool, to be switched later
 	let currentTool = 0;
 	
+	let mapLayer = new MapLayer(config.map.tileSize, config.map.tileProvider);
+	
 	let mapView = new MapView(window.innerWidth, window.innerHeight, config.map.width, config.map.height, [
 		//new ImageLayer("example.jpg", 10),
-		new MapLayer(config.map.tileSize, config.map.tileProvider),
+		mapLayer,
 		tracesLayer,
 		editLayer
 	], {
@@ -915,15 +1124,22 @@ function init() {
 		if (editTools[currentTool].deactivate) editTools[currentTool].deactivate();
 		currentTool = 1;
 		if (editTools[currentTool].activate) editTools[currentTool].activate();
+		editTools[currentTool].div.style.background = "#666";
 	}).catch(e => console.error(e));
 
-	
+	let LayerTool = {
+		div: null,
+		init() {
+			
+		}
+	};
 	
 	let layerToolbox = document.createElement("div");
 	layerToolbox.style.cssText = "position:fixed;right:10px;top:10px;border:1px solid #666;background:#999;";
 	document.body.appendChild(layerToolbox);
 	
 	let hiddenLayers = new Set();
+	let mapHidden = false;
 	
 	let activeLayer = null;
 	let repaintLayers = false;
@@ -932,11 +1148,7 @@ function init() {
 		repaintLayers = false;
 		if (!database.get(activeLayer)) activeLayer = null;
 		let layers = [...database.getIdsOfType("layer")].map(id => [id, database.get(id)]).sort((a,b) => (a[1].order||0)-(b[1].order||0));
-		if (activeLayer == null && layers.length) {
-			activeLayer = layers[0][0];
-		}
 		for (let k of hiddenLayers) if (!database.get(k)) hiddenLayers.delete(k);
-		hiddenLayers.delete(activeLayer);
 		
 		while (layerToolbox.lastChild) layerToolbox.removeChild(layerToolbox.lastChild);
 		for (let [id, data] of layers) {
@@ -944,6 +1156,8 @@ function init() {
 			let visibilityControl = p.appendChild(document.createElement("span"));
 			visibilityControl.textContent = "👁";
 			if (hiddenLayers.has(id)) visibilityControl.style.opacity = 0.3;
+			let svgItem = tracesSvgMap.get(id);
+			if (svgItem) svgItem.style.visibility = hiddenLayers.has(id) ? "hidden" : "visible"; 
 			visibilityControl.onclick = () => {
 				if (hiddenLayers.has(id)) hiddenLayers.delete(id); else hiddenLayers.add(id);
 				repaintLayers = true;
@@ -969,7 +1183,53 @@ function init() {
 			let nameControl = p.appendChild(document.createElement("span"));
 			nameControl.textContent = data.name;
 			nameControl.onclick = () => setActiveLayer(id);
-			if (id == activeLayer) { p.className = "active"; nameControl.style.fontWeight = "bold"; }
+			if (id == activeLayer) { p.className = "active"; p.style.background = "#666"; }
+			
+			let colorIndicator = nameControl.insertBefore(document.createElement("span"), nameControl.firstChild);
+			colorIndicator.style.cssText = "display:inline-block;width:10px;height:10px;border: 1px solid black;";
+			colorIndicator.style.backgroundColor = data.color;
+			
+			
+			p.appendChild(nameControl);
+			layerToolbox.appendChild(p);
+		}
+		{
+			// add map layer entry
+			let p = document.createElement("div");
+			let visibilityControl = p.appendChild(document.createElement("span"));
+			visibilityControl.textContent = "👁";
+			if (mapHidden) visibilityControl.style.opacity = 0.3;
+			mapLayer.container.style.visibility = mapHidden ? "hidden" : "visible"; 
+			visibilityControl.onclick = () => {
+				mapHidden = !mapHidden;
+				repaintLayers = true;
+				repaintLayersFunc();
+			};
+			p.appendChild(visibilityControl);
+			/*let viewExclusivelyControl = p.appendChild(document.createElement("span"));
+			viewExclusivelyControl.textContent = "#";
+			if (hiddenLayers.size == layers.length) {
+				viewExclusivelyControl.onclick = () => {
+					hiddenLayers = new Set();
+					setActiveLayer(null, true);
+				};
+			} else {
+				viewExclusivelyControl.style.opacity = 0.3;
+				viewExclusivelyControl.onclick = () => {
+					hiddenLayers = new Set(layers.map(l => l[0]));
+					setActiveLayer(null, true);
+				};
+			}
+			p.appendChild(viewExclusivelyControl);*/
+			let nameControl = p.appendChild(document.createElement("span"));
+			nameControl.textContent = "map";
+			nameControl.onclick = () => setActiveLayer(null);
+			//if (id == activeLayer) { p.className = "active"; p.style.background = "#666"; }
+			
+			let colorIndicator = nameControl.insertBefore(document.createElement("span"), nameControl.firstChild);
+			colorIndicator.style.cssText = "display:inline-block;width:10px;height:10px;border: 1px solid transparent;";
+			
+			
 			p.appendChild(nameControl);
 			layerToolbox.appendChild(p);
 		}
@@ -985,23 +1245,46 @@ function init() {
 		if (e.keyCode < 48 || e.keyCode > 57) return;
 		let num = (e.keyCode+1)%10;
 		let layers = [...database.getIdsOfType("layer")].map(id => [id, database.get(id)]).sort((a,b) => (a[1].order||0)-(b[1].order||0));
-		if (num >= layers.length) return;
-		let id = layers[num][0];
+		let id = num < layers.length ? layers[num][0] : null;
 		if (e.ctrlKey) {
-			if (hiddenLayers.has(id)) hiddenLayers.delete(id); else hiddenLayers.add(id);
+			if (id != null) {
+				if (hiddenLayers.has(id)) hiddenLayers.delete(id); else hiddenLayers.add(id);
+			} else {
+				mapHidden = !mapHidden;
+			}
 			repaintLayers = true;
 			repaintLayersFunc();
-		} /*else if (e.shiftKey) {
-			hiddenLayers = (hiddenLayers.size == layers.length-1 && !hiddenLayers.has(id)) ? new Set() : new Set(layers.map(l => l[0]));
-			hiddenLayers.delete(id);
-			setActiveLayer(id, true);
-		}*/ else {
+		/*} else if (e.shiftKey) {
+			if (id != null) {
+				hiddenLayers = (hiddenLayers.size == layers.length-1 && !hiddenLayers.has(id)) ? new Set() : new Set(layers.map(l => l[0]));
+				hiddenLayers.delete(id);
+			} else {
+				hiddenLayers = hiddenLayers.size == layers.length ? new Set() : new Set(layers.map(l => l[0]));
+			}
+			setActiveLayer(id, true);*/
+		} else {
 			setActiveLayer(id);
 		}
 		e.preventDefault();
 	});
 	
-
+	for (let i = 1; i < editTools.length; i++) {
+		let div = document.createElement("div");
+		div.textContent = editTools[i].name;
+		div.style.cssText = "position:fixed;left:10px;top:" + ((i-1)*30+10) + "px;width:20px;height:20px;overflow:hidden;border:1px solid black;background:#999;";
+		editTools[i].div = div;
+		document.body.appendChild(div);
+		div.setAttribute("data-index", i);
+		div.onclick = function() {
+			editTools[currentTool].deactivate();
+			editTools[currentTool].div.style.background = "#999";
+			currentTool = +this.getAttribute("data-index");
+			editTools[currentTool].div.style.background = "#666";
+			editTools[currentTool].activate();
+		};
+	}
+	
+	
 	
 	databaseWrapper.addGeneralUpdateListener(repaintLayersFunc);
 }
