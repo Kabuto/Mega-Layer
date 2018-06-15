@@ -45,7 +45,13 @@ class MapView {
 		this.setViewCoords(this.viewLeft, this.viewTop);
 		this.redraw();
 	}
-	constructor(width, height, mapWidth, mapHeight, layers, mouseListener) {
+	getSettings() {
+		return Object.assign({}, this.settings);
+	}
+	setSettings(settings) {
+		this.settings = settings;
+	}
+	constructor(width, height, mapWidth, mapHeight, layers, mouseListener, settings) {
 		this.mapWidth = mapWidth;
 		this.mapHeight = mapHeight;
 		
@@ -65,14 +71,16 @@ class MapView {
 		this.div = div;
 		this.mouseListener = mouseListener
 		
-		this.settings = {
+		this.settings = Object.assign({}, {
 			// true = mouse wheel always zooms (map-like), false = mouse wheel scrolls Y without keys pressed, scrolls X with shift key, scrolls Y with ctrl key
 			wheelZoom: true,
+			// true = keep the pixel under the pointer locked when zooming, false = keep the middle of the window locked when zooming
+			zoomAtPointer: true,
 			// a mouse button that, while held down, allows dragging the map around (can be set to left but then would disable rubberband; set to null to disable dragging - fast looking around is also possible through zooming)
 			dragButton: null,
 			// how many pixels to drag before dragging/rubberbanding is assumed (instead of just clicking)
 			dragThreshold: 4,
-		};
+		}, settings || {});
 		
 		this.layers = [];
 		for (let l of layers) {
@@ -121,8 +129,9 @@ class MapView {
 			}
 		};
 		this.div.addEventListener("wheel", e => {
+			if (this.eventsSuspended) return;
 			e.preventDefault();
-			let xy = getCoords(e);
+			let xy = this.settings.zoomAtPointer ? getCoords(e) : {x: this.viewLeft + this.width/2/this.viewZoom, y: this.viewTop + this.height/2/this.viewZoom, mouseX: this.width/2, mouseY: this.height/2};
 			let mapX = xy.x;
 			let mapY = xy.y;
 			if (this.settings.wheelZoom || !this.settings.wheelZoom && e.ctrlKey) {
@@ -154,6 +163,7 @@ class MapView {
 		let clickHandlers = [];
 		let dragstartCoords = null;
 		let mousemoveFunc = e => {
+			if (this.eventsSuspended) return;
 			e.preventDefault();
 			if (pressedButtons && dragstartCoords && Math.pow(dragstartCoords.x-e.clientX,2)+Math.pow(dragstartCoords.y-e.clientY,2) >= this.settings.dragThreshold) {
 				clickHandlers = [];
@@ -166,6 +176,7 @@ class MapView {
 			}
 		};
 		let mouseupFunc = e => {
+			if (this.eventsSuspended) return;
 			let xy = getCoords(e);
 			if (!(pressedButtons & (1<<e.button))) return;
 			if (!dragstartCoords) callEventHandler("dragend", e, xy, null, pressedButtons);
@@ -181,6 +192,7 @@ class MapView {
 			delete clickHandlers[e.button];
 		};
 		div.addEventListener("mousedown", e => {
+			if (this.eventsSuspended) return;
 			e.preventDefault();
 			if (pressedButtons & (1<<e.button)) return;
 			if (!pressedButtons) {
@@ -197,6 +209,7 @@ class MapView {
 		});
 		div.addEventListener("mousemove", mousemoveFunc);
 		div.addEventListener("contextmenu", e => {
+			if (this.eventsSuspended) return;
 			e.preventDefault();
 		});
 	}
@@ -213,6 +226,12 @@ class MapView {
 			l.moveStep();
 			l.moveFinish();
 		}
+	}
+	suspendEvents() {
+		this.eventsSuspended = true;
+	}
+	resumeEvents() {
+		this.eventsSuspended = false;
 	}
 }
 

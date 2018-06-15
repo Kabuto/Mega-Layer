@@ -44,7 +44,40 @@
 		stroke: rgba(255,255,255,.5);
 	}
 	
-	body { background: #444; }
+	body {
+		background: #444;
+		font-family: sans-serif;
+	}
+	.dialog {
+		position:fixed;left:50%;top:50%;margin-left:-400px;margin-top:-300px;width:800px;height:600px;background:#888;border:1px solid #222;
+	}
+	.dialog-block {
+		margin: 10px;
+	}
+	.dialog-headline {
+		font-size: 30px;
+		text-decoration: underline;
+	}
+	.dialog-row {
+		display: block;
+		margin: 4px 0;
+	}
+	.dialog-row-label {
+		display: inline-block;
+		width: 200px;
+	}
+	.dialog-popup {
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: 0;
+		bottom: 0;
+		background: #888;
+	}
+	.dialog-importexport {
+		width: 100%;
+		height: 90%;
+	}
 
 
 </style>
@@ -657,13 +690,78 @@ function init() {
 			this.selectedGroup = null;
 			this.hoveringGroup = null;
 			this.lastMousemoveCoords = null;
+			if (this.controls) {
+				this.controls.parentNode.removeChild(this.controls);
+				this.controls = null;
+				suspendKeyEvents = false;
+			}
+			document.body.title = "";
+		},
+		
+		select(line) {
+			this.selected = line;
+			this.markAllOf(this.selected, this.selectedGroup, " view-tool-selected");
+			if (this.controls) {
+				this.controls.parentNode.removeChild(this.controls);
+				this.controls = null;
+			}
+			if (this.selected) {
+				let signals = new Set();
+				for (let id of this.scanConnectedObjects(this.selected)) {
+					let data = database.get(id);
+					if (data.type == "line" && data.signal) {
+						signals.add(data.signal);
+					}
+				}
+			
+				let controls = this.controls = document.createElement("div");
+				this.controls.style.cssText = "position:fixed;left: 50px; top: 10px; background: #888;";
+				this.controls.appendChild(document.createTextNode("Signal (click to edit): "));
+				let input = document.createElement("span");
+				input.style.cssText = "background:#ccc;";
+				input.textContent = [...signals].join(" / ");
+				this.controls.appendChild(input);
+				controls.onclick = () => {
+					let newText = prompt("Enter a new name for this signal", input.textContent);
+					if (newText != null) this.updateName(newText);
+				};
+				document.body.appendChild(controls);
+			}
 		},
 		
 		mousedown(e) {
 			if (e.button == 0) {
-				this.selected = this.hovering;
-				this.markAllOf(this.selected, this.selectedGroup, " view-tool-selected");
+				this.select(this.hovering);
 			}
+		},
+		
+		updateName(text) {
+			let network = this.scanConnectedObjects(this.selected);
+			let named = new Set();
+			for (let id of this.scanConnectedObjects(this.selected)) {
+				let data = database.get(id);
+				if (data.type == "line" && data.signal) {
+					named.add(id);
+				}
+			}
+			let updates = [];
+			if (named.size > 1) {
+				for (let id of named) {
+					let data = database.get(id);
+					delete data.signal;
+					updates.push({id: id, oldData: true, data: data});
+				}
+				named = new Set();
+			}
+			let id = named.size == 1 ? [...named][0] : this.selected;
+			let data = database.get(id);
+			if (text) {
+				data.signal = text;
+			} else {
+				delete data.signal;
+			}
+			updates.push({id: id, oldData: true, data: data});
+			databaseWrapper.modify(updates);
 		},
 		
 		mousemove(e) {
@@ -704,12 +802,23 @@ function init() {
 			this.hovering = line;
 			this.markAllOf(line, this.hoveringGroup, " view-tool-hovering");
 			this.lastMousemoveCoords = {x: e.x, y: e.y};
+			
+			let signals = new Set();
+			if (this.hovering) {
+				let signals = new Set();
+				for (let id of this.scanConnectedObjects(this.hovering)) {
+					let data = database.get(id);
+					if (data.type == "line" && data.signal) {
+						signals.add(data.signal);
+					}
+				}
+				document.body.title = [...signals].join(" / ");
+			} else {
+				document.body.title = "";
+			}
 		},
 		
-		markAllOf(line, group, classPostfix) {
-			this.clear(group);
-			if (line == null) return;
-			// scan network for lines
+		scanConnectedObjects(line) {
 			let ldata = database.get(line);
 			let queue = [ldata.$point$1, ldata.$point$2];
 			let scanned = new Set([line, ldata.$point$1, ldata.$point$2]);
@@ -729,8 +838,14 @@ function init() {
 					}
 				}
 			}
+			return scanned;
+		},
+		
+		markAllOf(line, group, classPostfix) {
+			this.clear(group);
+			if (line == null) return;
 			// mark
-			for (let id of scanned) {
+			for (let id of this.scanConnectedObjects(line)) {
 				let data = database.get(id);
 				switch (data.type) {
 				case "point":
@@ -746,13 +861,12 @@ function init() {
 		},
 		
 		change3() {
-			if (!this.selected || !this.database.get(this.selected)) {
-				this.selected = null;
-				this.clear(this.selectedGroup);
-			}
-			this.hovering = null;
 			this.clear(this.hoveringGroup);
+			document.body.title = "";
+			// this re-enables hovering
 			if (this.lastMousemoveCoords) this.mousemove(this.lastMousemoveCoords);
+			let oldSelected = this.selected;
+			this.select(oldSelected != null && database.get(oldSelected) ? oldSelected : null);
 		},
 		
 		clear(node) {
@@ -1045,12 +1159,153 @@ function init() {
 				this.addDot(id, newData);
 			}
 		}
+	}, {
+		name: "settings",
+		activate() {
+			let c = (name, ...attrsOrChildren) => {
+				let result = document.createElement(name);
+				for (let item of attrsOrChildren) {
+					if (item == null) continue;
+					if (item.nodeType) {
+						result.appendChild(item);
+					} else if (typeof(item) == "object") {
+						for (let i in item) {
+							if (item[i] == null) continue;
+							if (i == "style" && typeof(item[i]) == "object") {
+								for (let j in item[i]) {
+									if (item[i][j] != null) result.style[j] = item[i][j];
+								}
+							} else if (typeof(item[i]) == "function") {
+								result[i] = item[i];
+							} else {
+								result.setAttribute(i, item[i]);
+							}
+						}
+					} else {
+						result.appendChild(document.createTextNode(item.toString()));
+					}
+				}
+				return result;
+			};
+			let settings = mapView.getSettings();
+			
+			this.dialog = c("div", {class: "dialog"});
+			document.body.appendChild(this.dialog);
+			
+			let handleExport = () => {
+				let text;
+				let layer = this.dialog.appendChild(c("div", {class: "dialog-popup"},
+					c("div", "Export"),
+					text = c("textarea", {class: "dialog-importexport"}),
+					c("div",
+						c("input", {type: "button", value: "Close", onclick: () => layer.parentNode.removeChild(layer)})
+					)
+				));
+				text.value = localStorage.getItem("dieshot");
+			};
+			
+			let handleImport = () => {
+				let text;
+				let layer = this.dialog.appendChild(c("div", {class: "dialog-popup"},
+					c("div", "Import"),
+					text = c("textarea", {class: "dialog-importexport"}),
+					c("div",
+						c("input", {type: "button", value: "Use", onclick: () => {
+							try {
+								new Database().modify(JSON.parse(text.value));
+								localStorage.setItem("dieshot", text.value);
+								document.body.innerHTML = "";
+								location.reload();
+							} catch (e) {
+								console.log(e);
+								alert("Failed to import: " + e.message);
+							}
+						}}),
+						c("input", {type: "button", value: "Cancel", onclick: () => layer.parentNode.removeChild(layer)})
+					)
+				));
+			};
+			let updateSetting = (name, value) => {
+				let settings = mapView.getSettings();
+				settings[name] = value;
+				mapView.setSettings(settings);
+				localStorage.setItem("settings", JSON.stringify(settings));
+			};
+			this.dialog.appendChild(
+				c("div", {class: "dialog-block"},
+					c("div", {class: "dialog-headline"}, "Map controls"),
+					c("label", {class: "dialog-row", title: "Checked = like a map (wheel zooms), unchecked = like a document (wheel scrolls Y, shift+wheel scrolls X, ctrl+wheel zooms)"},
+						c("span", {class: "dialog-row-label"}, "Wheel zooms map"),
+						c("span", c("input", {type: "checkbox", checked: settings.wheelZoom || null, onchange: function() {updateSetting("wheelZoom", this.checked)}}))
+					),
+					c("label", {class: "dialog-row", title: "Checked = zoom from/to what's under the mouse pointer, unchecked = ignore mouse pointer and zoom from/to the middle of the window"},
+						c("span", {class: "dialog-row-label"}, "Zoom at mouse pointer"),
+						c("span", c("input", {type: "checkbox", checked: settings.zoomAtPointer || null, onchange: function() {updateSetting("zoomAtPointer", this.checked)}}))
+					),
+					c("label", {class: "dialog-row", title: "Mouse button for dragging the map around"},
+						c("span", {class: "dialog-row-label"}, "Map drag button"),
+						c("span", c("select",
+							{onchange: function() {updateSetting("dragButton", this.value ? +this.value : null)}},
+							c("option", {value: ""}, "none"),
+							...["left", "middle/wheel", "right", "fourth", "fifth"].map((t, idx) => c("option", {value: idx, selected: settings.dragButton==idx || null}, t))
+						))
+					),
+					c("label", {class: "dialog-row", title: "How far the mouse needs to be moved to detect dragging instead of clicking"},
+						c("span", {class: "dialog-row-label"}, "Drag threshold"),
+						c("span", c("input", {type: "number", value: settings.dragThreshold, onchange: function() {if (!isNaN(+this.value)) updateSetting("dragThreshold", +this.value)}}))
+					)
+				)
+			);
+			this.dialog.appendChild(
+				c("div", {class: "dialog-block"},
+					c("div", {class: "dialog-headline"}, "Import/export"),
+					c("label", {class: "dialog-row", title: "Click to import a snapshot, deleting existing database contents. Hint: type [] to replace with an empty database."},
+						c("span", {class: "dialog-row-label"}, "Import (replacing database)"),
+						c("span", c("input", {type: "button", value: "Import", onclick: handleImport}))
+					),
+					c("label", {class: "dialog-row", title: "Click to export the current database state as a snapshot"},
+						c("span", {class: "dialog-row-label"}, "Export database"),
+						c("span", c("input", {type: "button", value: "Export", onclick: handleExport}))
+					)
+				),
+			);
+			let addLayerName, addLayerColor;
+			this.dialog.appendChild(
+				c("div", {class: "dialog-block"},
+					c("div", {class: "dialog-headline"}, "Add layer"),
+					c("label", {class: "dialog-row"}, "This is a temporary workaround while there's no layer GUI. As of now, layers can only be reordered/renamed/deleted through exporting, editing and importing."),
+					c("label", {class: "dialog-row", title: ""},
+						c("span", {class: "dialog-row-label"}, "Name"),
+						c("span", addLayerName = c("input", {type: "text", value: ""}))
+					),
+					c("label", {class: "dialog-row", title: ""},
+						c("span", {class: "dialog-row-label"}, "HTML color"),
+						c("span", addLayerColor = c("input", {type: "text", value: "#123456"}))
+					),
+					c("label", {class: "dialog-row", title: ""},
+						c("span", {class: "dialog-row-label"}, ""),
+						c("span", c("input", {type: "button", value: "Add layer", onclick: () => databaseWrapper.insert({type: "layer", name: addLayerName.value, color: addLayerColor.value, order: 0})}))
+					)
+				),
+			);
+			mapView.suspendEvents();
+			suspendKeyEvents = true;
+		},
+		deactivate() {
+			this.dialog.parentNode.removeChild(this.dialog);
+			this.dialog = null;
+			mapView.resumeEvents();
+			suspendKeyEvents = false;
+		}
 	}];
 	
 	// 0 = no tool, to be switched later
 	let currentTool = 0;
 	
 	let mapLayer = new MapLayer(config.map.tileSize, config.map.tileProvider);
+	
+	let settings = localStorage.getItem("settings");
+	settings = settings ? JSON.parse(settings) : {};
 	
 	let mapView = new MapView(window.innerWidth, window.innerHeight, config.map.width, config.map.height, [
 		//new ImageLayer("example.jpg", 10),
@@ -1064,11 +1319,21 @@ function init() {
 		dragstart: (e) => {			if (editTools[currentTool].dragstart) editTools[currentTool].dragstart(e);			},
 		drag: (e) => {				if (editTools[currentTool].drag) editTools[currentTool].drag(e);			},
 		dragend: (e) => {			if (editTools[currentTool].dragend) editTools[currentTool].dragend(e);			},
-	});
+	}, settings);
 	window.mapView = mapView;
 	window.addEventListener("resize", e => mapView.resize(window.innerWidth, window.innerHeight));
 
 	window.addEventListener("keypress", e => {
+		if (e.keyCode >= 112 && (e.keyCode-111) < editTools.length) {
+			editTools[currentTool].deactivate();
+			editTools[currentTool].div.style.background = "#999";
+			currentTool = e.keyCode-111;
+			editTools[currentTool].div.style.background = "#666";
+			editTools[currentTool].activate();
+			e.preventDefault();
+			return;
+		}
+		if (suspendKeyEvents) return;
 		console.log(e);
 		// escape aborts
 		if (e.keyCode == 27 && editTools[currentTool].abort) editTools[currentTool].abort();
@@ -1077,19 +1342,6 @@ function init() {
 		// Ctrl+Z/Y to undo/redo
 		else if (e.charCode == 122 && e.ctrlKey && !e.shiftKey) databaseWrapper.undo();
 		else if (e.charCode == 121 && e.ctrlKey && !e.shiftKey) databaseWrapper.redo();
-		// F7
-		else if (e.keyCode == 118) {
-			let newData = prompt("JSON data", localStorage.getItem("dieshot"));
-			if (newData != null) {
-				try {
-					JSON.parse(newData);
-					localStorage.setItem("dieshot", newData);
-					location.reload();
-				} catch (e) {
-					alert("Could not accept JSON data: " + e.message);
-				}
-			}
-		}
 		else return;
 		e.preventDefault();
 	});
@@ -1133,7 +1385,8 @@ function init() {
 			
 		}
 	};
-	
+
+	let suspendKeyEvents = false;
 	let layerToolbox = document.createElement("div");
 	layerToolbox.style.cssText = "position:fixed;right:10px;top:10px;border:1px solid #666;background:#999;";
 	document.body.appendChild(layerToolbox);
@@ -1242,6 +1495,7 @@ function init() {
 		repaintLayersFunc();
 	};
 	window.addEventListener("keydown", e => {
+		if (suspendKeyEvents) return;
 		if (e.keyCode < 48 || e.keyCode > 57) return;
 		let num = (e.keyCode+1)%10;
 		let layers = [...database.getIdsOfType("layer")].map(id => [id, database.get(id)]).sort((a,b) => (a[1].order||0)-(b[1].order||0));
