@@ -1395,7 +1395,7 @@ function init() {
 		if (editTools[currentTool].change) editTools[currentTool].change(id, oldData, newData, oldDataSupplier); 
 	});
 
-	databaseWrapper.init(callback => new LocalStorageBackend(callback)).then(() => {
+	databaseWrapper.init(callback => new SimpleScheduledBackend("updates", callback)).then(() => {
 		if (loadingHint.parentNode) loadingHint.parentNode.removeChild(loadingHint);
 		if (editTools[currentTool].deactivate) editTools[currentTool].deactivate();
 		currentTool = 1;

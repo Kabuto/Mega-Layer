@@ -174,14 +174,15 @@ class SimpleScheduledBackend {
 				if (changes) throw new Error();
 				return;
 			}
+			let json = await response.json();
 			this.fetching = false;
-			let json = response.json();
 			this.updateId = json.updateId;
 			if (json.clientToServerIDMap) {
 				json.clientToServerIDMap = new Map(json.clientToServerIDMap);
 			}
 			this.callback(json);
 		} catch (e) {
+			this.fetching = false;
 			console.log(e);
 		}
 		if (this.scheduleTimeout != null || this.fetching) return;

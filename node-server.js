@@ -2,12 +2,10 @@ const http = require('http'),
     fileSystem = require('fs'),
     path = require('path');
 	
-// get the database object (kludge as I don't want to use modules... yet)
-
-eval(fileSystem.readFileSync('database.js', 'utf8')); 
+// get the database and construct a new object instance (kludge as I don't want to use modules... yet)
+let database = eval(fileSystem.readFileSync('database.js', 'utf8') + ";new Database();"); 
 	
 // This database always stores the current snapshot
-let database = new Database();
 let lastUpdateId = "start";
 
 // load the database to memory
@@ -52,7 +50,7 @@ const port = 3000;
 
 function respondWithFile(res, filename, type) {
 	let filePath = path.join(__dirname, filename);
-	if (fs.existsSync(filePath)) {
+	if (fileSystem.existsSync(filePath)) {
 		res.writeHead(200, {
 			'Content-Type': type,
 			'Content-Length': fileSystem.statSync(filePath).size
@@ -72,10 +70,11 @@ const server = http.createServer((req, res) => {
 		respondWithFile(res, req.url.substring(1), 'application/javascript');
 	} else if (req.url.match(/^\/[\w\-]+\.css$/)) {
 		respondWithFile(res, req.url.substring(1), 'text/css');
-	} else if (req.url.match("/updates(?:\?after=([^#&]+))?")) {
-		handleUpdate(req, res, RegExp.$1 != null ? decodeURIComponent(RegExp.$1) : null);
+	} else if (req.url.match(/^\/updates(\?after=([^#&]+))?$/)) {
+		handleUpdate(req, res, RegExp.$1 ? decodeURIComponent(RegExp.$2) : null);
 	} else {
-		res.writeHead(404).end();
+		res.writeHead(404);
+		res.end();
 	}
 });
 
@@ -95,7 +94,8 @@ function handleUpdate(req, res, after) {
 			// Abort when exceeding ~ 10 MB of JSON data
 			if (jsonString.length > 1e7) {
 				jsonString = null;
-				res.writeHead(413, {'Content-Type': 'text/plain'}).end();
+				res.writeHead(413, {'Content-Type': 'text/plain'});
+				res.end();
 				req.connection.destroy();
 			}
 		});
@@ -104,9 +104,11 @@ function handleUpdate(req, res, after) {
 			if (jsonString != null) {
 				let updates;
 				try {
+					console.log(jsonString);
 					updates = JSON.parse(jsonString);
 				} catch (e) {
-					res.writeHead(400, {'Content-Type': 'text/plain'}).end(e.message);
+					res.writeHead(400, {'Content-Type': 'text/plain'});
+					res.end(e.message);
 					return;
 				}
 				let idMap = null, error = null;
@@ -170,7 +172,7 @@ function storeInDB(changes) {
 			if (!oldData) throw new Error("Tried to update/delete a non-existing object"); // the database could deal with this instead
 		}
 		let data = mapIDs(change.data);
-		dbPatchState.set(id, newData);
+		dbPatchState.set(id, data);
 		result.push({id: id, oldData: oldData, data: data});
 	}
 	// update local database (and detect errors)
@@ -192,13 +194,13 @@ function storeInDB(changes) {
 		if (entry.data) return {id: entry.id, data: entry.data};
 		if (entry.oldData) return {id: entry.id, oldData: true};
 		throw new Error();
-	)));
+	})));
 	let headerBuf = Buffer.alloc(8);
 	headerBuf.writeInt32LE(metadataBuf.length, 0);
 	headerBuf.writeInt32LE(updatesBuf.length, 4);
 	if (fileSystem.writeSync(dbFile, headerBuf, 0, 8) != 8) throw new Error();
-	if (fileSystem.readSync(dbFile, metadataBuf, 0, metadataBuf.length) != metadataBuf.length) throw new Error();
-	if (fileSystem.readSync(dbFile, updatesBuf, 0, updatesBuf.length) != updatesBuf.length) throw new Error();
+	if (fileSystem.writeSync(dbFile, metadataBuf, 0, metadataBuf.length) != metadataBuf.length) throw new Error();
+	if (fileSystem.writeSync(dbFile, updatesBuf, 0, updatesBuf.length) != updatesBuf.length) throw new Error();
 	fileSystem.fsyncSync(dbFile);
 
 	// return the map of ID mappings
@@ -209,17 +211,21 @@ function storeInDB(changes) {
 function sendUpdateResponse(res, after, idMap, error) {
 	let updates;
 	if (after == null) {
+		console.log("after == null");
 		// dump entire DB
 		updates = [...database.getAllIds()].map(id => ({id: id, data: database.get(id)}));
 	} else if (after == prevUpdateId) {
+		console.log("after.length = " + after.length);
 		// special case - all recent updates (can happen naturally so this needs to be checked for)
 		updates = [].concat.apply([], recentChanges.map(item => item.updates));
 	} else {
+		console.log("after.length = " + after.length);
 		// scan list of recent changes
 		let idx = recentChanges.indexOf(item => item.metadata.updateId == after);
 		if (idx == -1) {
 			// error - there's no such recent change
-			res.writeHead(500, {'Content-Type': 'text/plain'}).end("Cannot find update " + after + " in recent changes");
+			res.writeHead(500, {'Content-Type': 'text/plain'});
+			res.end("Cannot find update " + after + " in recent changes");
 			return;
 		}
 		updates = [].concat.apply([], recentChanges.slice(idx+1).map(item => item.updates));
