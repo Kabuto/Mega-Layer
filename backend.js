@@ -148,3 +148,54 @@ class LocalStorageBackend {
 		}
 	}
 }
+
+/**
+ * Very simple interface to a node.js-based backend that needs scheduled polls (i.e. no HTTP/2 streams)
+ */
+class SimpleScheduledBackend {
+	/**
+	 * @param callback The callback that will be called with updates after executing a method
+	 */
+	constructor(fetchURI, callback, scheduleDelay) {
+		this.callback = callback;
+		this.scheduleDelay = scheduleDelay || 5000;
+		this.fetchCounter = 0;
+		this.fetchURI = fetchURI;
+		this.doFetch();
+	}
+	
+	async doFetch(changes) {
+		this.fetching = true;
+		let fetchCounter = ++this.fetchCounter;
+		try {
+			let response = await fetch(this.fetchURI+(this.updateId ? "?after=" + encodeURIComponent(this.updateId) : ""), changes ? {method: "POST", body: JSON.stringify(changes)} : {});
+			// discard if outdated
+			if (fetchCounter != this.fetchCounter) {
+				if (changes) throw new Error();
+				return;
+			}
+			this.fetching = false;
+			let json = response.json();
+			this.updateId = json.updateId;
+			if (json.clientToServerIDMap) {
+				json.clientToServerIDMap = new Map(json.clientToServerIDMap);
+			}
+			this.callback(json);
+		} catch (e) {
+			console.log(e);
+		}
+		if (this.scheduleTimeout != null || this.fetching) return;
+		this.scheduleTimeout = setTimeout(() => {
+			this.scheduleTimeout = null;
+			this.doFetch();
+		}, this.scheduleDelay);
+	}
+	
+	update(changes) {
+		if (this.scheduleTimeout != null) {
+			clearTimeout(this.scheduleTimeout);
+			this.scheduleTimeout = null;
+		}
+		this.doFetch(changes);
+	}
+}
