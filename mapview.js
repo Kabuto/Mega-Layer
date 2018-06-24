@@ -77,7 +77,7 @@ class MapView {
 			// true = keep the pixel under the pointer locked when zooming, false = keep the middle of the window locked when zooming
 			zoomAtPointer: true,
 			// a mouse button that, while held down, allows dragging the map around (can be set to left but then would disable rubberband; set to null to disable dragging - fast looking around is also possible through zooming)
-			dragButton: null,
+			dragButton: 2,
 			// how many pixels to drag before dragging/rubberbanding is assumed (instead of just clicking)
 			dragThreshold: 4,
 		}, settings || {});
@@ -162,13 +162,20 @@ class MapView {
 		let pressedButtons = 0;
 		let clickHandlers = [];
 		let dragstartCoords = null;
+		let dragScrollCoords = null;
 		let mousemoveFunc = e => {
 			if (this.eventsSuspended) return;
 			e.preventDefault();
-			if (pressedButtons && dragstartCoords && Math.pow(dragstartCoords.x-e.clientX,2)+Math.pow(dragstartCoords.y-e.clientY,2) >= this.settings.dragThreshold) {
-				clickHandlers = [];
-				callEventHandler("dragstart", e, dragstartCoords.map, null, pressedButtons);
-				dragstartCoords = null;
+			if (dragScrollCoords != null) {
+				this.moveBy(dragScrollCoords.x-e.clientX, dragScrollCoords.y-e.clientY);
+				dragScrollCoords = {x: e.clientX, y: e.clientY};
+				this.redraw();
+			} else {
+				if (pressedButtons && dragstartCoords && Math.pow(dragstartCoords.x-e.clientX,2)+Math.pow(dragstartCoords.y-e.clientY,2) >= this.settings.dragThreshold) {
+					clickHandlers = [];
+					callEventHandler("dragstart", e, dragstartCoords.map, null, pressedButtons);
+					dragstartCoords = null;
+				}
 			}
 			callEventHandler("mousemove", e,getCoords(e),null,pressedButtons);
 			if (pressedButtons && !dragstartCoords) {
@@ -179,17 +186,25 @@ class MapView {
 			if (this.eventsSuspended) return;
 			let xy = getCoords(e);
 			if (!(pressedButtons & (1<<e.button))) return;
-			if (!dragstartCoords) callEventHandler("dragend", e, xy, null, pressedButtons);
-			pressedButtons &= ~(1<<e.button);
+			if (e.button == this.settings.dragButton) {
+				pressedButtons &= ~(1<<e.button);
+				dragScrollCoords = null;
+				if (dragstartCoords) {
+					dragstartCoords = {x: e.clientX, y: e.clientY};
+				}
+			} else {
+				if (!dragstartCoords) callEventHandler("dragend", e, xy, null, pressedButtons);
+				pressedButtons &= ~(1<<e.button);
+				callEventHandler("mouseup",e,xy,e.button);
+				callEventFunc(clickHandlers[e.button],e,xy,e.button);
+				delete clickHandlers[e.button];
+			}
 			if (!pressedButtons) {
 				window.removeEventListener("mousemove", mousemoveFunc);
 				div.addEventListener("mousemove", mousemoveFunc);
 				window.removeEventListener("mouseup", mouseupFunc);
 			}
 			e.preventDefault();
-			callEventHandler("mouseup",e,xy,e.button);
-			callEventFunc(clickHandlers[e.button],e,xy,e.button);
-			delete clickHandlers[e.button];
 		};
 		div.addEventListener("mousedown", e => {
 			if (this.eventsSuspended) return;
@@ -201,11 +216,16 @@ class MapView {
 				window.addEventListener("mouseup", mouseupFunc);
 			}
 			let xy = getCoords(e);
-			if (pressedButtons && !dragstartCoords) callEventHandler("dragend", e, xy, null, pressedButtons);
-			dragstartCoords = {x: e.clientX, y: e.clientY, map: xy};
-			pressedButtons |= 1<<e.button;
-			callEventHandler("mousedown", e, xy, e.button);
-			clickHandlers[e.button] = callEventHandler("click", e, xy, e.button);
+			if (e.button == this.settings.dragButton) {
+				pressedButtons |= 1<<e.button;
+				dragScrollCoords = {x: e.clientX, y: e.clientY};
+			} else {
+				if (pressedButtons && !dragstartCoords) callEventHandler("dragend", e, xy, null, pressedButtons);
+				dragstartCoords = {x: e.clientX, y: e.clientY, map: xy};
+				pressedButtons |= 1<<e.button;
+				callEventHandler("mousedown", e, xy, e.button);
+				clickHandlers[e.button] = callEventHandler("click", e, xy, e.button);
+			}
 		});
 		div.addEventListener("mousemove", mousemoveFunc);
 		div.addEventListener("contextmenu", e => {

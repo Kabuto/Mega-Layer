@@ -84,7 +84,17 @@
 
 <script>
 
+/*
 
+TODO list:
+
+* Render signal names at endpoints
+* Fix undo/redo
+* Support for structure elements
+* Add multiselect/rubberband support for dots for dragging them all at once, add suppport for mirroring (maybe also rotating and maybe even scaling) for the points being dragged
+* Find a better project name
+
+*/
 
 function init() {
 	let database = new Database();
@@ -505,14 +515,28 @@ function init() {
 	};
 	
 	
+	let recomputeNames = () => {
+		recomputeNamesTimeout = null;
+		// Scan the database for groups of connected objects
+		// Scan each group for names, assign a name to the group
+		// Then scan the database for endpoints
+		// Draw a name for each endpoint, avoiding other points and names
+		
+		
+	};
+	
 	// We use a SVG-based data backend for now
 	// This layer resembles all geometry that's currently stored in the database. Editing uses a different layer on top.
 	// We might choose to replace this with a tile-based layer and do partial updates (even within tiles)
 	// oldDataSupplier is a method that returns old data (from before the update) for any object when needed.
+	let recomputeNamesTimeout = null;
 	database.addChangeListener((id, oldData, newData, oldDataSupplier) => {
 		let svgItem;
 		// Added
 		if (!oldData && !newData) return;
+		if (recomputeNamesTimeout == null) {
+			recomputeNamesTimeout = setTimeout(recomputeNames, 10);
+		}
 		if ((newData || oldData).type == "layer") {
 			repaintLayers = true;
 			return;
