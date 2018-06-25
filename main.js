@@ -1,89 +1,3 @@
-<!DOCTYPE html>
-<html>
-<head>
-<meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/>
-<title>Test</title>
-<script src="config.js"></script>
-<script src="mapview.js"></script>
-<script src="database.js"></script>
-<script src="backend.js"></script>
-<style>
-	.data-layer-point {
-		fill: black;
-		stroke: none;
-	}
-	.data-layer-line {
-		stroke: black;
-	}
-	
-	.view-tool-hovering {
-		opacity: 0.7;
-	}
-	.view-tool-point {
-		stroke: none;
-		fill: white;
-	}
-	.view-tool-line {
-		stroke: white;
-	}
-	
-	.edit-tool-point {
-		fill: none;
-		stroke: white;
-		stroke-width: 1px;
-	}
-	.edit-tool-marker {
-		fill: none;
-		stroke: white;
-		stroke-width: 1px;
-	}
-	.edit-tool-marker-mousedown {
-		fill: black;
-	}
-	.edit-tool-line {
-		stroke: rgba(255,255,255,.5);
-	}
-	
-	body {
-		background: #444;
-		font-family: sans-serif;
-	}
-	.dialog {
-		position:fixed;left:50%;top:50%;margin-left:-400px;margin-top:-300px;width:800px;height:600px;background:#888;border:1px solid #222;
-	}
-	.dialog-block {
-		margin: 10px;
-	}
-	.dialog-headline {
-		font-size: 30px;
-		text-decoration: underline;
-	}
-	.dialog-row {
-		display: block;
-		margin: 4px 0;
-	}
-	.dialog-row-label {
-		display: inline-block;
-		width: 200px;
-	}
-	.dialog-popup {
-		position: absolute;
-		left: 0;
-		right: 0;
-		top: 0;
-		bottom: 0;
-		background: #888;
-	}
-	.dialog-importexport {
-		width: 100%;
-		height: 90%;
-	}
-
-
-</style>
-
-<script>
-
 /*
 
 TODO list:
@@ -899,6 +813,27 @@ function init() {
 		
 	}, {
 		name: "lines",
+
+		// the marker that indicates where an action will take place
+		dot: null,
+		// SVG shapes to indicate all active dots
+		dotMap: null,
+		// the active lines
+		lines: null,
+		
+		// location/ingredients of the current mousedown action
+		point: null,
+		// ID of the locally created database object
+		pointId: null,
+		// associated DB data
+		pointData: null,
+		// start position of the current mouse action
+		startPos: null,
+		// state of the current mouse action ("mousedown" / "dragging" / null)
+		state: null,
+
+		// previously selected point(s)
+		lastPoints: null,
 		
 		addDot(id, data) {
 			let dot = appendSVGItem(editLayer.svg, "circle", {class: "edit-tool-point", r: halfLineWidth, cx: data.x, cy: data.y});
@@ -917,7 +852,7 @@ function init() {
 			while (editLayer.svg.lastChild) editLayer.svg.removeChild(editLayer.svg.lastChild);
 			this.dot = null;
 			this.dotMap = null;
-			this.line = null;
+			this.lines = null;
 		},
 		getPoint(e, except) {
 			let nearestPoint = getPointAt(e, except);
@@ -976,10 +911,10 @@ function init() {
 			this.pointData = null;
 			this.startPos = null;
 			this.dot.setAttribute("class", "edit-tool-marker");
-			this.lastPoint = null;
-			if (this.line) {
-				this.line.parentNode.removeChild(this.line);
-				this.line = null;
+			this.lastPoints = null;
+			if (this.lines) {
+				this.lines.forEach(l => l.parentNode.removeChild(l));
+				this.lines = null;
 			}
 		},
 		delete() {
@@ -992,10 +927,10 @@ function init() {
 				this.pointData = null;
 				this.startPos = null;
 				this.dot.setAttribute("class", "edit-tool-marker");
-				this.lastPoint = null;
-				if (this.line) {
-					this.line.parentNode.removeChild(this.line);
-					this.line = null;
+				this.lastPoints = null;
+				if (this.lines) {
+					this.lines.forEach(l => l.parentNode.removeChild(l));
+					this.lines = null;
 				}
 				for (let id2 of database.getReferrers(id)) {
 					databaseWrapper.delete(id2);
@@ -1006,6 +941,18 @@ function init() {
 		},
 		mousemove(e) {
 			this.checkAbort();
+			let updateDotAndLines = pos => {
+				this.dot.setAttribute('cx', pos.x);
+				this.dot.setAttribute('cy', pos.y);
+				if (this.lines) {
+					let p0 = database.get(this.lastPoints[0]);
+					for (let i = 0; i < this.lastPoints.length; i++) {
+						let px = database.get(this.lastPoints[i]);
+						this.lines[i].setAttribute('x2', pos.x+px.x-p0.x);
+						this.lines[i].setAttribute('y2', pos.y+px.y-p0.y);
+					}
+				}
+			};
 			if (this.state == "dragging") {
 				this.dragPos = ({
 					x: e.x+this.point.coords.x-this.startPos.x, 
@@ -1013,12 +960,7 @@ function init() {
 				});
 				this.dragTarget = this.getPoint(this.dragPos, this.pointId);
 				let pos = this.dragTarget.coords;
-				this.dot.setAttribute('cx', pos.x);
-				this.dot.setAttribute('cy', pos.y);
-				if (this.line) {
-					this.line.setAttribute('x2', pos.x);
-					this.line.setAttribute('y2', pos.y);
-				}
+				updateDotAndLines(pos);
 				let newData = Object.assign({}, this.pointData);
 				newData.x = pos.x;
 				newData.y = pos.y;
@@ -1027,14 +969,18 @@ function init() {
 				return;
 			}
 
-			
+			// TODO this causes glitches
+			// TODO merge further points too, not just the one being dragged
 			let pos = this.getPoint(e).coords;
-			this.dot.setAttribute('cx', pos.x);
-			this.dot.setAttribute('cy', pos.y);
-			if (this.line) {
-				this.line.setAttribute('x2', pos.x);
-				this.line.setAttribute('y2', pos.y);
+			if (e.originalEvent.ctrlKey && this.lastPoints) {
+				let data = database.get(this.lastPoints[0]);
+				if (Math.abs(pos.x-data.x) > Math.abs(pos.y-data.y)) {
+					pos.y = data.y;
+				} else {
+					pos.x = data.x;
+				}
 			}
+			updateDotAndLines(pos);
 		},
 		dragstart(e) {
 			if (this.state == "mousedown") {
@@ -1105,7 +1051,7 @@ function init() {
 						}
 						databaseWrapper.delete(id);
 						id = null;
-						this.lastPoint = null;
+						this.lastPoints = null;
 						break;
 					case "line":
 						// split line into 2 halves with existing point
@@ -1121,47 +1067,76 @@ function init() {
 					}
 				}
 				
-				
-				let lastPoint = this.lastPoint;
-				this.lastPoint = oldState == "mousedown" && activeLayer != null && !hiddenLayers.has(activeLayer) ? id : null;
-				if (lastPoint) {
-					// draw line
-					let duplicate = false;
-					if (lastPoint != id) {
-						// don't insert the same line twice
-						duplicate = !insertLineIfNoDuplicate({type: "line", $point$1: lastPoint, $point$2: id, $layer$: activeLayer});
+				// TODO if shift is pressed, add point to selection instead as new first point or remove it again (and don't destroy selection upon dragging)
+				// TODO if multiple points are selected, draw parallel line from all of them
+				if (e.originalEvent.shiftKey && this.lastPoints) {
+					let idx = this.lastPoints.indexOf(id);
+					if (idx != -1) {
+						this.lastPoints.splice(idx, 1);
+						if (this.lastPoints.length == 0) {
+							this.lastPoints = null;
+						}
+					} else {
+						this.lastPoints.unshift(id);
 					}
-					if (duplicate || point.type != "new") {
-						this.lastPoint = null;
+				} else {
+					let lastPoints = this.lastPoints;
+					this.lastPoints = oldState == "mousedown" && activeLayer != null && !hiddenLayers.has(activeLayer) ? [id] : null;
+					if (lastPoints) {
+						// draw line
+						let duplicate = false;
+						let p0 = database.get(lastPoints[0]);
+						for (let i = 0; i < lastPoints.length; i++) {
+							let px = database.get(lastPoints[i]);
+							let point2;
+							if (i == 0) {
+								point2 = id;
+							} else {
+								point2 = databaseWrapper.insert({type: "point", x: px.x-p0.x+data.x, y: px.y-p0.y+data.y});
+								if (this.lastPoints) this.lastPoints.push(point2);
+							}
+							duplicate = duplicate | !insertLineIfNoDuplicate({type: "line", $point$1: lastPoints[i], $point$2: point2, $layer$: activeLayer});
+						}
+						if (duplicate || point.type != "new") {
+							this.lastPoints = null;
+						}
 					}
 				}
-				if (this.lastPoint && !this.line) {
-					this.line = appendSVGItem(editLayer.svg, "line", {class: "edit-tool-line"}, {strokeWidth: halfLineWidthPx});
+				if (this.lines) {
+					this.lines.forEach(l => l.parentNode.removeChild(l));
+					this.lines = null;
 				}
-				if (!this.lastPoint && this.line) {
-					this.line.parentNode.removeChild(this.line);
-					this.line = null;
-				}
-				if (this.line) {
-					this.line.setAttribute('x1', data.x);
-					this.line.setAttribute('y1', data.y);
-					this.line.setAttribute('x2', data.x);
-					this.line.setAttribute('y2', data.y);
+				if (this.lastPoints) {
+					this.lines = [];
+					this.lines = this.lastPoints.map(id => {
+						let data = database.get(id);
+						let line = appendSVGItem(editLayer.svg, "line", {class: "edit-tool-line"}, {strokeWidth: halfLineWidthPx});
+						line.setAttribute('x1', data.x);
+						line.setAttribute('y1', data.y);
+						line.setAttribute('x2', data.x);
+						line.setAttribute('y2', data.y);
+						return line;
+					});
 				}
 			}
 		},
 		change2(oldState, newState) {
 			//console.log("change2: " + JSON.stringify(oldState) + " => " + JSON.stringify(newState));
-			if (oldState && this.lastPoint == oldState.id) {
-				this.lastPoint = newState ? newState.id : null;
-				if (this.line) {
+			if (oldState && this.lastPoints) {
+				let idx = this.lastPoints.indexOf(oldState.id);
+				if (idx != -1) {
 					if (newState) {
-						this.line.setAttribute('x1', newState.data.x);
-						this.line.setAttribute('y1', newState.data.y);
+						this.lastPoints[idx] = newState.id;
+						if (this.line) {
+							this.line.setAttribute('x1', newState.data.x);
+							this.line.setAttribute('y1', newState.data.y);
+						}
 					} else {
-						this.line.parentNode.removeChild(this.line);
-						this.line = null;
-						this.lastPoint = null;
+						this.lastPoints = null;
+						if (this.line) {
+							this.line.parentNode.removeChild(this.line);
+							this.line = null;
+						}
 					}
 				}
 			}
@@ -1395,7 +1370,7 @@ function init() {
 		if (editTools[currentTool].change) editTools[currentTool].change(id, oldData, newData, oldDataSupplier); 
 	});
 
-	databaseWrapper.init(callback => new SimpleScheduledBackend("updates", callback)).then(() => {
+	databaseWrapper.init(backendProvider).then(() => {
 		if (loadingHint.parentNode) loadingHint.parentNode.removeChild(loadingHint);
 		if (editTools[currentTool].deactivate) editTools[currentTool].deactivate();
 		currentTool = 1;
@@ -1431,7 +1406,7 @@ function init() {
 		for (let [id, data] of layers) {
 			let p = document.createElement("div");
 			let visibilityControl = p.appendChild(document.createElement("span"));
-			visibilityControl.textContent = "👁";
+			visibilityControl.textContent = "ðŸ‘";
 			if (hiddenLayers.has(id)) visibilityControl.style.opacity = 0.3;
 			let svgItem = tracesSvgMap.get(id);
 			if (svgItem) svgItem.style.visibility = hiddenLayers.has(id) ? "hidden" : "visible"; 
@@ -1474,7 +1449,7 @@ function init() {
 			// add map layer entry
 			let p = document.createElement("div");
 			let visibilityControl = p.appendChild(document.createElement("span"));
-			visibilityControl.textContent = "👁";
+			visibilityControl.textContent = "ðŸ‘";
 			if (mapHidden) visibilityControl.style.opacity = 0.3;
 			mapLayer.container.style.visibility = mapHidden ? "hidden" : "visible"; 
 			visibilityControl.onclick = () => {
@@ -1566,8 +1541,3 @@ function init() {
 	
 	databaseWrapper.addGeneralUpdateListener(repaintLayersFunc);
 }
-</script>
-</head>
-<body onload="init()">
-</body>
-</html>

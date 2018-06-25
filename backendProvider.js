@@ -1,0 +1,1 @@
+let backendProvider = callback => new LocalStorageBackend(callback);

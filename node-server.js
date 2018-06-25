@@ -48,33 +48,89 @@ let serverIDGenerator = [...database.getAllIds()].reduce((a,b) => Math.max(a,b),
 const hostname = '127.0.0.1';
 const port = 3000;
 
-function respondWithFile(res, filename, type) {
-	let filePath = path.join(__dirname, filename);
-	if (fileSystem.existsSync(filePath)) {
-		res.writeHead(200, {
-			'Content-Type': type,
-			'Content-Length': fileSystem.statSync(filePath).size
-		});
-		fileSystem.createReadStream(filePath).pipe(res);
-	} else {
-		res.writeHead(404);
-		res.end();
+
+function ignoringErrors(req, action) {
+	req.on('error', e => console.log(e));
+	try {
+		action();
+	} catch (e) {
+		console.log(e);
 	}
 }
 
+function respondWithFile(req, res, filename, type) {
+	ignoringErrors(req, () => {
+		let filePath = path.join(__dirname, filename);
+		// ignore errors
+		if (fileSystem.existsSync(filePath)) {
+			res.writeHead(200, {
+				'Content-Type': type,
+				'Content-Length': fileSystem.statSync(filePath).size
+			});
+			fileSystem.createReadStream(filePath).pipe(res);
+		} else {
+			res.writeHead(404);
+			res.end();
+		}
+	});
+}
+
+function simpleResponse(req, res, status, message) {
+	ignoringErrors(req, () => {
+		res.writeHead(status, {'Content-Type': 'text/plain'});
+		res.end(message || "");
+	});
+}
+
+// Parses JSON data. In case of an error an error is returned to the client, the recipient can thus just ignore the error when not needed.
+function parseJSONResponse(req, res) {
+	return new Promise((resolve, reject) => {
+		let jsonString = '';
+
+		req.on('error', e => {
+			jsonString = null;
+			simpleResponse(req, res, 400);
+			reject(e);
+		});
+		
+		req.on('data', data => {
+			if (jsonString == null) return;
+			jsonString += data;
+			// Abort when exceeding ~ 10 MB of JSON data
+			if (jsonString.length > 1e7) {
+				jsonString = null;
+				simpleResponse(req, res, 413);
+				req.connection.destroy();
+				reject(new Error("Maximum size exceeded"));
+			}
+		});
+
+		req.on('end', () => {
+			if (jsonString != null) {
+				try {
+					resolve(JSON.parse(jsonString));
+				} catch (e) {
+					simpleResponse(req, res, 400, e.message);
+					reject(e);
+				}
+			}
+		});
+	});
+}
 
 const server = http.createServer((req, res) => {
 	if (req.url == "/") {
-		respondWithFile(res, 'test.html', 'text/html');
+		respondWithFile(req, res, 'index.html', 'text/html');
+	} else if (req.url == "/backendProvider.js") {
+		respondWithFile(req, res, 'backendProvider.node.js', 'text/html');
 	} else if (req.url.match(/^\/[\w\-]+\.js$/)) {
-		respondWithFile(res, req.url.substring(1), 'application/javascript');
+		respondWithFile(req, res, req.url.substring(1), 'application/javascript');
 	} else if (req.url.match(/^\/[\w\-]+\.css$/)) {
-		respondWithFile(res, req.url.substring(1), 'text/css');
+		respondWithFile(req, res, req.url.substring(1), 'text/css');
 	} else if (req.url.match(/^\/updates(\?after=([^#&]+))?$/)) {
 		handleUpdate(req, res, RegExp.$1 ? decodeURIComponent(RegExp.$2) : null);
 	} else {
-		res.writeHead(404);
-		res.end();
+		simpleResponse(req, res, 404);
 	}
 });
 
@@ -85,44 +141,19 @@ server.listen(port, hostname, () => {
 // This method handles a request that wants to retrieve and optionally store database updates
 function handleUpdate(req, res, after) {
 	if (req.method == "POST") {
-		// the client sent an update
-		let jsonString = '';
-
-		req.on('data', data => {
-			if (jsonString == null) return;
-			jsonString += data;
-			// Abort when exceeding ~ 10 MB of JSON data
-			if (jsonString.length > 1e7) {
-				jsonString = null;
-				res.writeHead(413, {'Content-Type': 'text/plain'});
-				res.end();
-				req.connection.destroy();
+		parseJSONResponse(req, res).then(updates => {
+			let idMap = null, error = null;
+			try {
+				// We don't get the actual update result yet since we'll retrieve it from the recentChanges list later on
+				console.log(`Received a DB update consisting of ${updates.length} changes`);
+				idMap = storeInDB(updates);
+			} catch (e) {
+				console.log(`DB update failed`, e);
+				error = e.message;
 			}
-		});
-
-		req.on('end', () => {
-			if (jsonString != null) {
-				let updates;
-				try {
-					console.log(jsonString);
-					updates = JSON.parse(jsonString);
-				} catch (e) {
-					res.writeHead(400, {'Content-Type': 'text/plain'});
-					res.end(e.message);
-					return;
-				}
-				let idMap = null, error = null;
-				try {
-					// We don't get the actual update result yet since we'll retrieve it from the recentChanges list later on
-					console.log(`Received a DB update consisting of ${updates.length} changes`);
-					idMap = storeInDB(updates);
-				} catch (e) {
-					console.log(`DB update failed`, e);
-					error = e.message;
-				}
-				sendUpdateResponse(res, after, idMap, error);
+			sendUpdateResponse(res, after, idMap, error);
 			}
-		});
+		}, e => {}).catch(e => console.log(e));
 	} else {
 		sendUpdateResponse(res, after);
 	}

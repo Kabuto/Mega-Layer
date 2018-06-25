@@ -1,0 +1,70 @@
+.data-layer-point {
+	fill: black;
+	stroke: none;
+}
+.data-layer-line {
+	stroke: black;
+}
+
+.view-tool-hovering {
+	opacity: 0.7;
+}
+.view-tool-point {
+	stroke: none;
+	fill: white;
+}
+.view-tool-line {
+	stroke: white;
+}
+
+.edit-tool-point {
+	fill: none;
+	stroke: white;
+	stroke-width: 1px;
+}
+.edit-tool-marker {
+	fill: none;
+	stroke: white;
+	stroke-width: 1px;
+}
+.edit-tool-marker-mousedown {
+	fill: black;
+}
+.edit-tool-line {
+	stroke: rgba(255,255,255,.5);
+}
+
+body {
+	background: #444;
+	font-family: sans-serif;
+}
+.dialog {
+	position:fixed;left:50%;top:50%;margin-left:-400px;margin-top:-300px;width:800px;height:600px;background:#888;border:1px solid #222;
+}
+.dialog-block {
+	margin: 10px;
+}
+.dialog-headline {
+	font-size: 30px;
+	text-decoration: underline;
+}
+.dialog-row {
+	display: block;
+	margin: 4px 0;
+}
+.dialog-row-label {
+	display: inline-block;
+	width: 200px;
+}
+.dialog-popup {
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: 0;
+	bottom: 0;
+	background: #888;
+}
+.dialog-importexport {
+	width: 100%;
+	height: 90%;
+}
