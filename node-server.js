@@ -34,7 +34,9 @@ for (;;) {
 	lastUpdateId = metadata.updateId;
 	database.modify(updates);
 	count++;
+	//console.log(`entry ${metadata.updateId} containing ${updates.length} changes`);
 }
+//console.log(`last update id is ${lastUpdateId}`);
 console.log(`${count} entries read, starting web server`);
 
 
@@ -43,6 +45,8 @@ let recentChanges = [];
 // Update ID from before all the changes in the list of recent changes
 let prevUpdateId = lastUpdateId;
 let serverIDGenerator = [...database.getAllIds()].reduce((a,b) => Math.max(a,b), 0);
+
+//console.log(`prev update id is ${prevUpdateId}`);
 
 	
 const hostname = '127.0.0.1';
@@ -127,6 +131,9 @@ const server = http.createServer((req, res) => {
 		respondWithFile(req, res, req.url.substring(1), 'application/javascript');
 	} else if (req.url.match(/^\/[\w\-]+\.css$/)) {
 		respondWithFile(req, res, req.url.substring(1), 'text/css');
+	} else if (req.url.match(/^(\/(?!\.\.?\/)[\w\-\.~]+)+\/[\w\-\.~]+\.jpg$/)) {
+		// map provider
+		respondWithFile(req, res, req.url.substring(1), 'image/jpeg');
 	} else if (req.url.match(/^\/updates(\?after=([^#&]+))?$/)) {
 		handleUpdate(req, res, RegExp.$1 ? decodeURIComponent(RegExp.$2) : null);
 	} else {
@@ -145,14 +152,13 @@ function handleUpdate(req, res, after) {
 			let idMap = null, error = null;
 			try {
 				// We don't get the actual update result yet since we'll retrieve it from the recentChanges list later on
-				console.log(`Received a DB update consisting of ${updates.length} changes`);
+				//console.log(`Received a DB update consisting of ${updates.length} changes`);
 				idMap = storeInDB(updates);
 			} catch (e) {
 				console.log(`DB update failed`, e);
 				error = e.message;
 			}
 			sendUpdateResponse(res, after, idMap, error);
-			}
 		}, e => {}).catch(e => console.log(e));
 	} else {
 		sendUpdateResponse(res, after);
@@ -212,9 +218,11 @@ function storeInDB(changes) {
 	// Discard old entries from list of recent changees
 	let timestamp = (new Date()).getTime();
 	while (recentChanges.length && recentChanges[0].metadata.timestamp < timestamp-60*1000) prevUpdateId = recentChanges.shift().metadata.updateId;
+	//console.log(`prev update id is ${prevUpdateId}`);
 
 	// store updates in local updates list
 	lastUpdateId = "r" + Math.random();
+	//console.log(`last update id is ${lastUpdateId}`);
 	let metadata = {updateId: lastUpdateId, timestamp: timestamp};
 	recentChanges.push({updates: result, metadata: metadata});
 
@@ -242,26 +250,28 @@ function storeInDB(changes) {
 function sendUpdateResponse(res, after, idMap, error) {
 	let updates;
 	if (after == null) {
-		console.log("after == null");
+		//console.log("after == null");
 		// dump entire DB
 		updates = [...database.getAllIds()].map(id => ({id: id, data: database.get(id)}));
 	} else if (after == prevUpdateId) {
-		console.log("after.length = " + after.length);
+		//console.log("after.length = " + recentChanges.length);
 		// special case - all recent updates (can happen naturally so this needs to be checked for)
 		updates = [].concat.apply([], recentChanges.map(item => item.updates));
 	} else {
-		console.log("after.length = " + after.length);
 		// scan list of recent changes
-		let idx = recentChanges.indexOf(item => item.metadata.updateId == after);
+		let idx = recentChanges.findIndex(item => item.metadata.updateId == after);
 		if (idx == -1) {
 			// error - there's no such recent change
 			res.writeHead(500, {'Content-Type': 'text/plain'});
+			//console.log("Cannot find update " + after + " in recent changes; these are: " + recentChanges.map(item => item.metadata.updateId).join(","));
 			res.end("Cannot find update " + after + " in recent changes");
 			return;
+		} else {
+			//console.log(`after.length = ${recentChanges.length-(idx+1)}`);
 		}
 		updates = [].concat.apply([], recentChanges.slice(idx+1).map(item => item.updates));
 	}
-	console.log(`Client poll contains ${updates.length} changes`);
+	//console.log(`Client poll contains ${updates.length} changes`);
 	let response = {objects: updates, updateId: lastUpdateId};
 	if (idMap) response.clientToServerIDMap = [...idMap];
 	if (error) response.error = error;
