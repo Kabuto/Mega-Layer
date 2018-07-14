@@ -451,8 +451,7 @@ class ImageLayer {
 // Uses SVG directly
 class SVGLayer {
 	constructor() {
-		this.svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-		this.svg.style.position = "absolute";
+		this.svg = this.create("svg", null, {position: "absolute"});
 	}
 	initialise(mapView) {
 		this.mapView = mapView;
@@ -467,6 +466,19 @@ class SVGLayer {
 		this.svg.style.height = this.mapView.viewZoom*this.mapView.mapHeight + "px";
 	}
 	moveFinish() {}
+	append(name, attrs, style) {
+		return this.appendTo(this.svg, name, attrs, style);
+	}
+	appendTo(parent, name, attrs, style) {
+		let item = document.createElementNS("http://www.w3.org/2000/svg", name);
+		if (attrs) for (let i in attrs) if (attrs[i] != null) item.setAttribute(i, attrs[i]);
+		if (style) for (let i in style) if (style[i] != null) item.style[i] = style[i];
+		if (parent) parent.appendChild(item);
+		return item;
+	}
+	create(name, attrs, style) {
+		return this.appendTo(null, name, attrs, style);
+	}
 }
 
 class MapTileLayer {
